@@ -13,10 +13,12 @@ Serve the folder over HTTP (ES modules don't load from `file://`):
 
 ```sh
 cd DTXPlayerWeb
-python3 -m http.server 8000
+python3 serve.py        # http://localhost:8000 (port as optional argument)
 ```
 
-Then open <http://localhost:8000>.
+`serve.py` is a stock `http.server` that additionally disables caching, so
+updates appear on plain reload. `python3 -m http.server 8000` also works, but
+browsers may cache files — hard-reload (Cmd+Shift+R) after updating.
 
 ## Usage
 
@@ -52,6 +54,18 @@ Scroll and play speed are adjusted with −/+ steppers (hold to repeat).
   chart and is remembered per chart.
 - **Notes / BGM / Master volume** — drum-note keysounds and BGM/auto-played
   sounds (BGM track, SE channels, hidden chips) have independent volume buses.
+- **Tab strip** — the "Tab" button cycles Off → Bottom → Top, showing drum
+  sheet notation (inspired by
+  [drum-game](https://github.com/Jumprocks1/drum-game)) as a strip above or
+  below the scrolling lanes, both synchronized to the same playhead: a
+  five-line staff with standard kit mapping (kick bottom space, snare third
+  space, x-heads for cymbals/hi-hat, ring for open hi-hat), hands beamed
+  upward and feet downward with automatic 8th/16th beaming, and noteheads
+  colored per note type.
+- **Practice loop** — click a measure on the tab strip to loop it; click
+  another measure to extend the loop across the range; click inside the loop
+  to clear it (or use the ✕ on the loop badge). Playback cycles the looped
+  measures, restarting mid-BGM correctly.
 - **Lane display** (in the Settings panel):
   - *Lane order*: rearrange the 10 lanes arbitrarily with ▲/▼.
   - *Grouping*: DTXMania-style merge checkboxes — LC→HH (HH group),

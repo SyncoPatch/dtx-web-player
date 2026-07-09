@@ -32,7 +32,7 @@ let seeking = false;
 
 const SETTINGS_KEY = 'dtx-settings';
 const settings = {
-  scroll: 1, playSpeed: 1, offsetMs: 0,
+  scroll: 1, playSpeed: 1, offsetMs: 0, tabPos: 'off',
   volMaster: 0.9, volBgm: 1, volNotes: 1,
   groups: { lc: false, lp: false, ft: false, rd: false },
   laneOrder: [...LANE_IDS],
@@ -48,6 +48,8 @@ try {
     display: { ...defaultDisplay(), ...saved.display },
     laneOrder: Array.isArray(saved.laneOrder) ? saved.laneOrder : settings.laneOrder,
     hiddenLanes: Array.isArray(saved.hiddenLanes) ? saved.hiddenLanes : [],
+    // Migrate the old full-screen tab mode to the bottom strip.
+    tabPos: saved.tabPos ?? (saved.view === 'tab' ? 'bottom' : 'off'),
   });
 } catch { /* keep defaults */ }
 
@@ -71,6 +73,7 @@ function applyOffset() {
 
 function applySettings(p) {
   p.speed = settings.scroll;
+  p.setTabPos(settings.tabPos);
   p.setOffset((settings.offsetMs + chartOffset()) / 1000);
   p.setPlaySpeed(settings.playSpeed);
   p.setVolume(settings.volMaster);
@@ -389,6 +392,7 @@ async function openChart(song, chartInfo) {
       player = new Player($('chart'));
       player.onFrame = onPlayerFrame;
       player.onEnded = () => { el.btnPlay.textContent = 'Play'; };
+      player.onLoopChange = updateLoopUI;
       player.onStretchProgress = (p) => {
         el.overlayText.textContent = `Time-stretching audio… ${Math.round(p * 100)}%`;
       };
@@ -487,6 +491,35 @@ $('btn-play').onclick = async () => {
     el.btnPlay.textContent = 'Pause';
   }
 };
+
+// ---- tab strip & practice loop ----
+
+const TAB_CYCLE = { off: 'bottom', bottom: 'top', top: 'off' };
+const TAB_LABEL = { off: 'Tab: Off', bottom: 'Tab: Bottom', top: 'Tab: Top' };
+
+function updateViewButton() {
+  const btn = $('btn-view');
+  btn.textContent = TAB_LABEL[settings.tabPos] || 'Tab: Off';
+  btn.classList.toggle('active', settings.tabPos !== 'off');
+}
+
+$('btn-view').onclick = () => {
+  settings.tabPos = TAB_CYCLE[settings.tabPos] || 'bottom';
+  saveSettings();
+  player?.setTabPos(settings.tabPos);
+  updateViewButton();
+};
+
+function updateLoopUI(loop) {
+  const info = $('loop-info');
+  info.hidden = !loop;
+  if (loop) {
+    const pad = (n) => String(n).padStart(3, '0');
+    $('loop-text').textContent = `Loop ${pad(loop.startNum)}–${pad(loop.endNum)}`;
+  }
+}
+
+$('btn-loop-clear').onclick = () => player?.clearLoop();
 
 $('btn-restart').onclick = () => {
   if (!player) return;
@@ -922,4 +955,5 @@ document.addEventListener('keydown', (e) => {
 
 navigator.storage?.persist?.().catch(() => {});
 initControlsFromSettings();
+updateViewButton();
 renderSongList();

@@ -74,6 +74,28 @@ export const GROUP_RULES = {
 // Open/close hi-hat and left pedal choke each other.
 const HH_GROUP = new Set([0x11, 0x18, 0x1B]);
 
+// ---- drum tab (sheet notation) ----
+// Staff positions in half-steps from the top staff line (even = on a line).
+// Hands are stemmed/beamed upward, feet downward, like standard kit notation.
+const TAB_HANDS = new Map([
+  [0x1A, -4], // LC: high ledger
+  [0x16, -2], // CY: ledger above staff
+  [0x11, -1], [0x18, -1], // HH closed/open: above top line
+  [0x19, 0],  // RD: top line
+  [0x14, 1],  // HT
+  [0x15, 2],  // LT
+  [0x12, 3],  // SD
+  [0x17, 5],  // FT
+]);
+const TAB_FEET = new Map([
+  [0x13, 7], [0x1C, 7], // BD / LBD: bottom space
+  [0x1B, 9],            // LP: below the staff
+]);
+const TAB_XHEAD = new Set([0x1A, 0x16, 0x11, 0x18, 0x19, 0x1B]); // cymbals & pedal
+const TAB_PPS = 150;     // horizontal px/second at scroll speed 1.0
+const TAB_GAP = 12;      // staff line spacing
+const TAB_STRIP_H = 170; // height of the tab strip above/below the lanes
+
 const LOOKAHEAD = 0.35;   // real seconds of audio scheduled ahead
 const TICK_MS = 60;       // scheduler interval
 const START_DELAY = 0.08; // gap between pressing play and audio start
@@ -130,6 +152,9 @@ export class Player {
     this.offset = 0;       // display-audio offset in seconds (visual only):
                            // positive shifts notes later to compensate for
                            // audio output latency
+    this.tabPos = 'off';   // tab strip position: 'off' | 'top' | 'bottom'
+    this.loop = null;      // { startIdx, endIdx, startNum, endNum, startTime, endTime }
+    this._tab = { cols: [], groups: [] };
     this.groups = { lc: false, lp: false, ft: false, rd: false };
     this.laneOrder = [...LANE_IDS];
     this.colors = defaultColors();
@@ -150,6 +175,28 @@ export class Player {
     this.onFrame = null; // (player) called every rendered frame
     this.onEnded = null;
     this.onStretchProgress = null; // (0..1) while preparing time-stretch
+    this.onLoopChange = null; // (loop | null) after loop edits
+
+    // Clicking a measure inside the tab strip sets/extends/clears the
+    // practice loop.
+    canvas.addEventListener('click', (e) => {
+      const r = this._tabRegion();
+      if (!r || !this.bars.length || !this._cssW) return;
+      if (e.offsetY < r.top || e.offsetY > r.top + r.h) return;
+      const ppsH = (TAB_PPS * this.speed) / this.playSpeed;
+      const playheadX = this._cssW * 0.25;
+      const now = Math.min(this.time - this.offset, this.duration);
+      const t = now + (e.offsetX - playheadX) / ppsH;
+      if (t < 0 || t >= this.duration) return;
+      let idx = lowerBound(this.bars, t + 1e-9) - 1; // last bar at or before t
+      if (idx < 0) idx = 0;
+      this._loopClick(idx);
+    });
+    canvas.addEventListener('pointermove', (e) => {
+      const r = this._tabRegion();
+      canvas.style.cursor =
+        r && e.offsetY >= r.top && e.offsetY <= r.top + r.h ? 'pointer' : '';
+    });
 
     // Track the canvas CSS size via ResizeObserver instead of reading
     // clientWidth/Height every frame (those force a synchronous reflow
@@ -181,7 +228,10 @@ export class Player {
     this.bars = dtx.bars;
     this.beats = dtx.beats || [];
     this._chartEnd = dtx.chartEnd;
+    this.loop = null;
+    this.onLoopChange?.(null);
     this._rebuildLanes();
+    this._buildTab();
     await this._prepareStretched(); // also computes this.duration
     return result;
   }
@@ -336,6 +386,51 @@ export class Player {
     this.offset = seconds;
   }
 
+  setTabPos(pos) {
+    this.tabPos = pos === 'top' || pos === 'bottom' ? pos : 'off';
+    if (this.tabPos === 'off') this.canvas.style.cursor = '';
+  }
+
+  // Tab strip rectangle in CSS px, or null when hidden / canvas too short.
+  _tabRegion() {
+    if (this.tabPos === 'off') return null;
+    const H = this._cssH;
+    if (!H || H < TAB_STRIP_H + 160) return null;
+    return { top: this.tabPos === 'top' ? 0 : H - TAB_STRIP_H, h: TAB_STRIP_H };
+  }
+
+  // Practice loop over whole measures (bar indices, inclusive).
+  setLoop(startIdx, endIdx) {
+    const last = this.bars.length - 1;
+    if (last < 0) return;
+    const a = Math.max(0, Math.min(startIdx, last));
+    const b = Math.max(a, Math.min(endIdx, last));
+    this.loop = {
+      startIdx: a,
+      endIdx: b,
+      startNum: this.bars[a].num,
+      endNum: this.bars[b].num,
+      startTime: this.bars[a].time,
+      endTime: this.bars[b + 1]?.time ?? this.duration,
+    };
+    this.onLoopChange?.(this.loop);
+  }
+
+  clearLoop() {
+    this.loop = null;
+    this.onLoopChange?.(null);
+  }
+
+  // First click starts a one-measure loop, clicking outside extends it,
+  // clicking inside clears it.
+  _loopClick(idx) {
+    const L = this.loop;
+    if (!L) this.setLoop(idx, idx);
+    else if (idx < L.startIdx) this.setLoop(idx, L.endIdx);
+    else if (idx > L.endIdx) this.setLoop(L.startIdx, idx);
+    else this.clearLoop();
+  }
+
   // Completely hide individual lanes (their chips are not drawn; audio is
   // unaffected).
   setHiddenLanes(ids) {
@@ -392,6 +487,65 @@ export class Player {
     this._resetPointers(this.playing ? this.time : this.pausedAt);
   }
 
+  // Precompute notation columns (simultaneous chips) and beam groups.
+  // Beaming: hands and feet are grouped per beat; adjacent columns closer
+  // than a 16th get a double beam, up to a dotted-8th gap a single beam.
+  _buildTab() {
+    const cols = [];
+    let cur = null;
+    for (const c of this.chips) {
+      if (!c.visible) continue;
+      const hp = TAB_HANDS.get(c.ch);
+      const fp = TAB_FEET.get(c.ch);
+      if (hp === undefined && fp === undefined) continue;
+      if (!cur || c.time - cur.time > 1e-4) {
+        cur = { time: c.time, hands: [], feet: [] };
+        cols.push(cur);
+      }
+      if (hp !== undefined) cur.hands.push({ ch: c.ch, p: hp });
+      else cur.feet.push({ ch: c.ch, p: fp });
+    }
+
+    // Beat boundaries = measure starts + beat lines.
+    const bounds = [...this.bars.map((b) => b.time), ...this.beats.map((b) => b.time)]
+      .sort((a, b) => a - b);
+    const beatIdx = (t) => {
+      let lo = 0, hi = bounds.length;
+      while (lo < hi) {
+        const mid = (lo + hi) >> 1;
+        if (bounds[mid] <= t + 1e-9) lo = mid + 1;
+        else hi = mid;
+      }
+      return lo - 1;
+    };
+    const beatDur = (bi) =>
+      (bi >= 0 && bi + 1 < bounds.length) ? bounds[bi + 1] - bounds[bi]
+        : (bounds.length > 1 ? bounds[bounds.length - 1] - bounds[bounds.length - 2] : 0.5);
+
+    const groups = [];
+    for (const voice of ['hands', 'feet']) {
+      let g = null;
+      for (let i = 0; i < cols.length; i++) {
+        if (!cols[i][voice].length) continue;
+        const bi = beatIdx(cols[i].time);
+        if (g && g.beat === bi) {
+          const prev = cols[g.cols[g.cols.length - 1]].time;
+          const gap = cols[i].time - prev;
+          const D = beatDur(bi);
+          if (gap <= 0.751 * D) {
+            g.pairBeams.push(gap <= 0.26 * D ? 2 : 1);
+            g.cols.push(i);
+            continue;
+          }
+        }
+        g = { voice, beat: bi, cols: [i], pairBeams: [], start: cols[i].time };
+        groups.push(g);
+      }
+    }
+    groups.sort((a, b) => a.start - b.start);
+    this._tab = { cols, groups };
+  }
+
   _resetPointers(t) {
     // The flash pointer tracks the (offset-shifted) display clock.
     this._visIdx = lowerBound(this.notes, t - this.offset);
@@ -400,6 +554,10 @@ export class Player {
 
   _tick() {
     const now = this.time;
+    if (this.loop && now >= this.loop.endTime - 0.005) {
+      this.seek(this.loop.startTime);
+      return;
+    }
     if (now >= this.duration) {
       this.pause();
       this.pausedAt = this.duration;
@@ -482,18 +640,52 @@ export class Player {
     g.setTransform(dpr, 0, 0, dpr, 0, 0);
 
     const now = Math.min(this.time - this.offset, this.duration);
+
+    g.fillStyle = '#101018';
+    g.fillRect(0, 0, W, H);
+
+    // Optional tab strip at the top or bottom; the lanes take the rest.
+    const region = this._tabRegion();
+    let laneTop = 0, laneBot = H;
+    if (region) {
+      if (this.tabPos === 'top') laneTop = region.h;
+      else laneBot = region.top;
+    }
+
+    this._renderLanes(g, W, laneTop, laneBot, now);
+
+    if (region) {
+      g.save();
+      g.beginPath();
+      g.rect(0, region.top, W, region.h);
+      g.clip();
+      this._renderTab(g, W, region.top, region.h, now);
+      g.restore();
+      g.fillStyle = 'rgba(255,255,255,0.18)';
+      g.fillRect(0, this.tabPos === 'top' ? region.h - 1 : region.top, W, 1);
+    }
+
+    this.onFrame?.(this);
+  };
+
+  // Falling-notes lanes, rendered into the [y0, y1) band.
+  _renderLanes(g, W, y0, y1, now) {
+    const RH = y1 - y0;
+    if (RH < 40) return;
     // Dividing by playSpeed keeps the on-screen scroll velocity constant:
     // at half tempo, notes spread out instead of crawling.
     const pps = (BASE_PPS * this.speed) / this.playSpeed;
     const disp = this.display;
     const dark = disp.dark;
     const dir = disp.reverse ? 1 : -1;      // reverse: notes scroll upward
-    const hitY = disp.reverse ? 78 : H - 78;
-    const span = H - 58;                    // px of visible approach distance
+    const hitY = disp.reverse ? y0 + 78 : y1 - 78;
+    const span = RH - 58;                   // px of visible approach distance
     const lanes = this.lanes;
 
-    g.fillStyle = '#101018';
-    g.fillRect(0, 0, W, H);
+    g.save();
+    g.beginPath();
+    g.rect(0, y0, W, RH);
+    g.clip();
 
     const totalUnits = lanes.reduce((a, l) => a + l.w, 0) || 1;
     const chartW = Math.min(W - 40, 680);
@@ -513,15 +705,15 @@ export class Player {
       const bgAlpha = (Math.max(0, Math.min(100, disp.laneOpacity)) / 100) * 0.12;
       g.fillStyle = `rgba(255,255,255,${bgAlpha.toFixed(4)})`;
       for (let i = 0; i < lanes.length; i++) {
-        g.fillRect(laneX[i] + 1, 0, lanes[i].w * unit - 2, H);
+        g.fillRect(laneX[i] + 1, y0, lanes[i].w * unit - 2, RH);
       }
       g.strokeStyle = 'rgba(255,255,255,0.10)';
       g.lineWidth = 1;
       g.beginPath();
       x = x0;
       for (let i = 0; i <= lanes.length; i++) {
-        g.moveTo(Math.round(x) + 0.5, 0);
-        g.lineTo(Math.round(x) + 0.5, H);
+        g.moveTo(Math.round(x) + 0.5, y0);
+        g.lineTo(Math.round(x) + 0.5, y1);
         if (i < lanes.length) x += lanes[i].w * unit;
       }
       g.stroke();
@@ -639,6 +831,183 @@ export class Player {
       }
     }
 
-    this.onFrame?.(this);
-  };
+    g.restore();
+  }
+
+  // Drum sheet notation strip (drum-game style): a five-line staff scrolls
+  // right-to-left past a fixed playhead. Rendered into [yTop, yTop+tabH).
+  _renderTab(g, W, yTop, tabH, now) {
+    const ppsH = (TAB_PPS * this.speed) / this.playSpeed;
+    const playheadX = Math.round(W * 0.25);
+    const G = TAB_GAP;
+    const staffTop = Math.round(yTop + 60);
+    const yOfP = (p) => staffTop + (p * G) / 2;
+    const xOf = (t) => playheadX + (t - now) * ppsH;
+    const tMin = now - playheadX / ppsH - 0.5;
+    const tMax = now + (W - playheadX) / ppsH + 0.5;
+
+    // Practice-loop highlight.
+    if (this.loop) {
+      const xa = Math.max(0, xOf(this.loop.startTime));
+      const xb = Math.min(W, xOf(this.loop.endTime));
+      if (xb > xa) {
+        g.fillStyle = 'rgba(77,163,255,0.10)';
+        g.fillRect(xa, yTop + 4, xb - xa, tabH - 8);
+        g.fillStyle = 'rgba(77,163,255,0.55)';
+        for (const x of [xOf(this.loop.startTime), xOf(this.loop.endTime)]) {
+          if (x >= -2 && x <= W + 2) g.fillRect(Math.round(x) - 1, yTop + 4, 2, tabH - 8);
+        }
+      }
+    }
+
+    // Staff lines.
+    g.strokeStyle = 'rgba(255,255,255,0.45)';
+    g.lineWidth = 1;
+    g.beginPath();
+    for (let i = 0; i < 5; i++) {
+      const y = Math.round(yOfP(i * 2)) + 0.5;
+      g.moveTo(0, y);
+      g.lineTo(W, y);
+    }
+    g.stroke();
+
+    // Bar lines and measure numbers.
+    g.font = '11px sans-serif';
+    g.textAlign = 'center';
+    for (let i = lowerBound(this.bars, tMin); i < this.bars.length; i++) {
+      const bar = this.bars[i];
+      if (bar.time > tMax) break;
+      const x = Math.round(xOf(bar.time)) + 0.5;
+      g.strokeStyle = 'rgba(255,255,255,0.5)';
+      g.beginPath();
+      g.moveTo(x, yOfP(0));
+      g.lineTo(x, yOfP(8));
+      g.stroke();
+      g.fillStyle = 'rgba(255,255,255,0.45)';
+      g.fillText(String(bar.num).padStart(3, '0'), x, yOfP(8) + 2.2 * G);
+    }
+    // Beat ticks.
+    if (this.display.beatLines) {
+      g.strokeStyle = 'rgba(255,255,255,0.15)';
+      g.beginPath();
+      for (let i = lowerBound(this.beats, tMin); i < this.beats.length; i++) {
+        if (this.beats[i].time > tMax) break;
+        const x = Math.round(xOf(this.beats[i].time)) + 0.5;
+        g.moveTo(x, yOfP(0));
+        g.lineTo(x, yOfP(8));
+      }
+      g.stroke();
+    }
+
+    // Playhead.
+    g.fillStyle = '#ff4d4d';
+    g.fillRect(playheadX - 1, yTop + 4, 2, tabH - 28);
+
+    const { cols, groups } = this._tab;
+
+    // Note heads (with ledger lines) per column.
+    const headR = 4.6;
+    for (let i = lowerBound(cols, tMin); i < cols.length; i++) {
+      const col = cols[i];
+      if (col.time > tMax) break;
+      const x = xOf(col.time);
+      for (const list of [col.hands, col.feet]) {
+        for (const n of list) {
+          const y = yOfP(n.p);
+          const color = this.colors[CH_TYPE.get(n.ch)] || '#fff';
+          // Ledger lines above the staff for cymbal positions.
+          if (n.p <= -2) {
+            g.strokeStyle = 'rgba(255,255,255,0.4)';
+            g.lineWidth = 1;
+            g.beginPath();
+            for (let lp = -2; lp >= n.p; lp -= 2) {
+              g.moveTo(x - 8, Math.round(yOfP(lp)) + 0.5);
+              g.lineTo(x + 8, Math.round(yOfP(lp)) + 0.5);
+            }
+            g.stroke();
+          }
+          if (TAB_XHEAD.has(n.ch)) {
+            g.strokeStyle = color;
+            g.lineWidth = 2;
+            g.beginPath();
+            g.moveTo(x - headR, y - headR);
+            g.lineTo(x + headR, y + headR);
+            g.moveTo(x - headR, y + headR);
+            g.lineTo(x + headR, y - headR);
+            g.stroke();
+            if (n.ch === 0x18) { // open hi-hat: small ring above
+              g.beginPath();
+              g.arc(x, y - G - 2, 2.6, 0, Math.PI * 2);
+              g.stroke();
+            }
+          } else {
+            g.fillStyle = color;
+            g.beginPath();
+            g.ellipse(x, y, headR + 0.8, headR - 0.6, -0.3, 0, Math.PI * 2);
+            g.fill();
+          }
+        }
+      }
+    }
+
+    // Stems and beams per group. Groups are sorted by start time and span at
+    // most one beat, so start the scan a few seconds early.
+    const stemLen = 2.8 * G;
+    let gLo = 0, gHi = groups.length;
+    while (gLo < gHi) {
+      const mid = (gLo + gHi) >> 1;
+      if (groups[mid].start < tMin - 8) gLo = mid + 1;
+      else gHi = mid;
+    }
+    for (let gi = gLo; gi < groups.length; gi++) {
+      const grp = groups[gi];
+      if (grp.start > tMax) break;
+      const lastCol = cols[grp.cols[grp.cols.length - 1]];
+      if (lastCol.time < tMin) continue;
+      const up = grp.voice === 'hands';
+      const stemDx = up ? headR + 0.5 : -headR - 0.5;
+
+      // Beam height: past the outermost head of the whole group.
+      let extreme = up ? Infinity : -Infinity;
+      for (const ci of grp.cols) {
+        for (const n of cols[ci][grp.voice]) {
+          const y = yOfP(n.p);
+          extreme = up ? Math.min(extreme, y) : Math.max(extreme, y);
+        }
+      }
+      const yBeam = up ? extreme - stemLen : extreme + stemLen;
+
+      // Stems: from the innermost head of each column to the beam.
+      g.strokeStyle = 'rgba(235,235,245,0.9)';
+      g.lineWidth = 1.6;
+      g.beginPath();
+      const stemXs = [];
+      for (const ci of grp.cols) {
+        const col = cols[ci];
+        let inner = up ? -Infinity : Infinity;
+        for (const n of col[grp.voice]) {
+          const y = yOfP(n.p);
+          inner = up ? Math.max(inner, y) : Math.min(inner, y);
+        }
+        const sx = xOf(col.time) + stemDx;
+        stemXs.push(sx);
+        g.moveTo(sx, inner);
+        g.lineTo(sx, yBeam);
+      }
+      g.stroke();
+
+      // Beams.
+      if (grp.cols.length > 1) {
+        g.fillStyle = 'rgba(235,235,245,0.9)';
+        const dirY = up ? 1 : -1;
+        g.fillRect(stemXs[0] - 0.8, up ? yBeam : yBeam - 3, stemXs[stemXs.length - 1] - stemXs[0] + 1.6, 3);
+        for (let k = 0; k < grp.pairBeams.length; k++) {
+          if (grp.pairBeams[k] >= 2) {
+            const y2 = yBeam + dirY * 5;
+            g.fillRect(stemXs[k] - 0.8, up ? y2 : y2 - 3, stemXs[k + 1] - stemXs[k] + 1.6, 3);
+          }
+        }
+      }
+    }
+  }
 }

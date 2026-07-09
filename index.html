@@ -46,6 +46,11 @@
       <span id="time-cur" class="time">0:00</span>
       <input type="range" id="seek" min="0" max="1000" value="0" step="1">
       <span id="time-total" class="time">0:00</span>
+      <button id="btn-view" class="btn small toggle" title="Show drum sheet notation as a strip above or below the lanes — click measures on it to set a practice loop">Tab: Off</button>
+      <span id="loop-info" hidden>
+        <span id="loop-text"></span>
+        <button id="btn-loop-clear" class="btn small" title="Clear practice loop">&times;</button>
+      </span>
     </div>
     <div class="controls-row secondary">
       <span class="slider-label">Scroll <span id="speed-stepper"></span></span>
