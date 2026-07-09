@@ -32,7 +32,7 @@ let seeking = false;
 
 const SETTINGS_KEY = 'dtx-settings';
 const settings = {
-  scroll: 1, playSpeed: 1,
+  scroll: 1, playSpeed: 1, offsetMs: 0,
   volMaster: 0.9, volBgm: 1, volNotes: 1,
   groups: { lc: false, lp: false, ft: false, rd: false },
   laneOrder: [...LANE_IDS],
@@ -55,8 +55,23 @@ function saveSettings() {
   localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
 }
 
+// Per-chart display offsets (ms), added on top of the global offsetMs.
+const CHART_OFFSETS_KEY = 'dtx-chart-offsets';
+let chartOffsets = {};
+try { chartOffsets = JSON.parse(localStorage.getItem(CHART_OFFSETS_KEY) || '{}') || {}; } catch { /* keep empty */ }
+let currentChartKey = null; // `${songId}::${chartPath}` of the loaded chart
+
+function chartOffset() {
+  return currentChartKey ? (chartOffsets[currentChartKey] || 0) : 0;
+}
+
+function applyOffset() {
+  player?.setOffset((settings.offsetMs + chartOffset()) / 1000);
+}
+
 function applySettings(p) {
   p.speed = settings.scroll;
+  p.setOffset((settings.offsetMs + chartOffset()) / 1000);
   p.setPlaySpeed(settings.playSpeed);
   p.setVolume(settings.volMaster);
   p.setBgmVolume(settings.volBgm);
@@ -319,6 +334,11 @@ async function renderSongList() {
     del.onclick = async () => {
       if (!confirm(`Delete "${song.title}" from this browser?`)) return;
       await deleteSong(song.id);
+      let pruned = false;
+      for (const key of Object.keys(chartOffsets)) {
+        if (key.startsWith(song.id + '::')) { delete chartOffsets[key]; pruned = true; }
+      }
+      if (pruned) localStorage.setItem(CHART_OFFSETS_KEY, JSON.stringify(chartOffsets));
       renderSongList();
     };
     head.append(title, del);
@@ -374,6 +394,10 @@ async function openChart(song, chartInfo) {
       };
       applySettings(player);
     }
+
+    currentChartKey = `${song.id}::${chartInfo.path}`;
+    applyOffset();
+    refreshSteppers('offsetChart');
 
     const resolve = makeResolver(fileMap, dirname(chartInfo.path));
     const { missing, failed } = await player.load(dtx, resolve, (done, total) => {
@@ -482,10 +506,7 @@ el.seek.addEventListener('change', () => {
 
 // ---- shared setting setters (keep the bottom bar and the panel in sync) ----
 
-const SCROLL_RANGE = { min: 0.25, max: 10, step: 0.25 };
-const PLAYSPEED_RANGE = { min: 0.25, max: 2, step: 0.05 };
-
-const steppers = { scroll: [], playSpeed: [] };            // stepper instances
+const steppers = { scroll: [], playSpeed: [], offsetGlobal: [], offsetChart: [] };
 const volEls = { volMaster: [], volBgm: [], volNotes: [] }; // range inputs
 
 function refreshSteppers(key) {
@@ -523,6 +544,22 @@ async function applyPlaySpeedNow() {
   if (busy && --stretchJobs === 0) hideOverlay();
 }
 
+function setGlobalOffset(v) {
+  settings.offsetMs = v;
+  saveSettings();
+  applyOffset();
+  refreshSteppers('offsetGlobal');
+}
+
+function setChartOffset(v) {
+  if (!currentChartKey) return;
+  if (v === 0) delete chartOffsets[currentChartKey];
+  else chartOffsets[currentChartKey] = v;
+  localStorage.setItem(CHART_OFFSETS_KEY, JSON.stringify(chartOffsets));
+  applyOffset();
+  refreshSteppers('offsetChart');
+}
+
 const VOL_APPLY = {
   volMaster: (p, v) => p.setVolume(v),
   volBgm: (p, v) => p.setBgmVolume(v),
@@ -537,11 +574,32 @@ function setVolumeSetting(key, v) {
   for (const n of volEls[key]) n.value = v;
 }
 
+const fmtX = (v) => v.toFixed(2) + 'x';
+const fmtMs = (v) => (v > 0 ? '+' : '') + v + ' ms';
+
+const STEPPER_DEFS = {
+  scroll: {
+    min: 0.25, max: 10, step: 0.25, fmt: fmtX,
+    get: () => settings.scroll, apply: setScrollSetting,
+  },
+  playSpeed: {
+    min: 0.25, max: 2, step: 0.05, fmt: fmtX,
+    get: () => settings.playSpeed, apply: setPlaySpeedSetting,
+  },
+  offsetGlobal: {
+    min: -1000, max: 1000, step: 5, fmt: fmtMs,
+    get: () => settings.offsetMs, apply: setGlobalOffset,
+  },
+  offsetChart: {
+    min: -1000, max: 1000, step: 5, fmt: fmtMs,
+    get: chartOffset, apply: setChartOffset,
+    enabled: () => !!currentChartKey, // needs a loaded chart
+  },
+};
+
 // A −/+ stepper with press-and-hold repeat.
 function makeStepper(key) {
-  const { min, max, step } = key === 'scroll' ? SCROLL_RANGE : PLAYSPEED_RANGE;
-  const get = () => (key === 'scroll' ? settings.scroll : settings.playSpeed);
-  const applyValue = key === 'scroll' ? setScrollSetting : setPlaySpeedSetting;
+  const { min, max, step, fmt, get, apply: applyValue, enabled } = STEPPER_DEFS[key];
 
   const root = document.createElement('span');
   root.className = 'stepper';
@@ -559,13 +617,19 @@ function makeStepper(key) {
   const stepper = {
     el: root,
     refresh() {
+      if (enabled && !enabled()) {
+        val.textContent = '—';
+        down.disabled = up.disabled = true;
+        return;
+      }
       const v = get();
-      val.textContent = v.toFixed(2) + 'x';
+      val.textContent = fmt(v);
       down.disabled = v <= min + 1e-9;
       up.disabled = v >= max - 1e-9;
     },
   };
   const bump = (d) => {
+    if (enabled && !enabled()) return;
     let v = Math.round((get() + d * step) / step) * step;
     v = Math.max(min, Math.min(max, +v.toFixed(4)));
     if (v !== get()) applyValue(v);
@@ -791,6 +855,12 @@ function buildPlaybackSection() {
   };
   row('Scroll speed', makeStepper('scroll').el);
   row('Play speed', makeStepper('playSpeed').el);
+  const g = makeStepper('offsetGlobal');
+  g.el.title = 'Display-audio offset: positive shifts notes later, to compensate for audio output latency';
+  row('Display offset', g.el);
+  const c = makeStepper('offsetChart');
+  c.el.title = 'Extra offset for the currently open chart, added on top of the global display offset';
+  row('Chart offset', c.el);
   for (const [key, text] of [['volNotes', 'Notes volume'], ['volBgm', 'BGM volume'], ['volMaster', 'Master volume']]) {
     const input = document.createElement('input');
     input.type = 'range';

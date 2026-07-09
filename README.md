@@ -46,6 +46,10 @@ Scroll and play speed are adjusted with −/+ steppers (hold to repeat).
   transients are untouched. Applied when the slider is released (stretching a
   full-length BGM takes a moment — there's a progress overlay; rapid stepper
   clicks are debounced so only the final value is stretched).
+- **Display offset** — shifts the notes relative to the audio to compensate
+  for audio output latency (±1000 ms, 5 ms steps; positive = notes hit the
+  line later). A **chart offset** can be added on top for the currently open
+  chart and is remembered per chart.
 - **Notes / BGM / Master volume** — drum-note keysounds and BGM/auto-played
   sounds (BGM track, SE channels, hidden chips) have independent volume buses.
 - **Lane display** (in the Settings panel):

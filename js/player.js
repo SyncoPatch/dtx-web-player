@@ -127,6 +127,9 @@ export class Player {
     this.ctxStart = 0;
     this.speed = 1.0;      // scroll speed (visual only)
     this.playSpeed = 1.0;  // playback tempo (audio + clock)
+    this.offset = 0;       // display-audio offset in seconds (visual only):
+                           // positive shifts notes later to compensate for
+                           // audio output latency
     this.groups = { lc: false, lp: false, ft: false, rd: false };
     this.laneOrder = [...LANE_IDS];
     this.colors = defaultColors();
@@ -327,6 +330,12 @@ export class Player {
     this.display = { ...defaultDisplay(), ...display };
   }
 
+  // Display-audio offset in seconds; only the renderer's clock shifts, audio
+  // scheduling is untouched.
+  setOffset(seconds) {
+    this.offset = seconds;
+  }
+
   // Completely hide individual lanes (their chips are not drawn; audio is
   // unaffected).
   setHiddenLanes(ids) {
@@ -384,7 +393,8 @@ export class Player {
   }
 
   _resetPointers(t) {
-    this._visIdx = lowerBound(this.notes, t);
+    // The flash pointer tracks the (offset-shifted) display clock.
+    this._visIdx = lowerBound(this.notes, t - this.offset);
     this._laneFlash.fill(-Infinity);
   }
 
@@ -471,7 +481,7 @@ export class Player {
     }
     g.setTransform(dpr, 0, 0, dpr, 0, 0);
 
-    const now = Math.min(this.time, this.duration);
+    const now = Math.min(this.time - this.offset, this.duration);
     // Dividing by playSpeed keeps the on-screen scroll velocity constant:
     // at half tempo, notes spread out instead of crawling.
     const pps = (BASE_PPS * this.speed) / this.playSpeed;
@@ -574,7 +584,7 @@ export class Player {
     if (disp.laneFlash && dark !== 'full') {
       for (let i = 0; i < lanes.length; i++) {
         const dt = now - this._laneFlash[i];
-        if (dt < 0.15) {
+        if (dt >= 0 && dt < 0.15) {
           const a = 1 - dt / 0.15;
           g.fillStyle = this.colors[lanes[i].id];
           g.globalAlpha = a * 0.55;
