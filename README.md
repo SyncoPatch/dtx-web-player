@@ -62,10 +62,19 @@ Scroll and play speed are adjusted with −/+ steppers (hold to repeat).
   space, x-heads for cymbals/hi-hat, ring for open hi-hat), hands beamed
   upward and feet downward with automatic 8th/16th beaming, and noteheads
   colored per note type.
-- **Practice loop** — click a measure on the tab strip to loop it; click
-  another measure to extend the loop across the range; click inside the loop
-  to clear it (or use the ✕ on the loop badge). Playback cycles the looped
-  measures, restarting mid-BGM correctly.
+- **Tab navigation** — a "Tab zoom" stepper (0.25x–4x, also Ctrl+wheel or
+  pinch over the strip) controls how many measures fit on screen. While
+  paused, the mouse wheel scrolls the strip to browse the chart, and a single
+  click seeks to that measure (recentering the view). Measure spacing is
+  independent of play speed, so notation keeps its width when practicing
+  slow.
+- **Practice loop** — while paused, click and drag across the strip to paint
+  a measure-snapped loop; dragging past either edge auto-scrolls so long
+  ranges are easy. Drag a loop edge (grips shown) to resize it, including
+  past the opposite edge. Click inside the region (or the loop badge) to
+  temporarily disable the loop — it turns grey and playback passes through —
+  and click again to re-enable. Clear it with the ✕ on the badge. Playback
+  cycles the looped measures, restarting mid-BGM correctly.
 - **Lane display** (in the Settings panel):
   - *Lane order*: rearrange the 10 lanes arbitrarily with ▲/▼.
   - *Grouping*: DTXMania-style merge checkboxes — LC→HH (HH group),

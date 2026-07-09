@@ -32,7 +32,7 @@ let seeking = false;
 
 const SETTINGS_KEY = 'dtx-settings';
 const settings = {
-  scroll: 1, playSpeed: 1, offsetMs: 0, tabPos: 'off',
+  scroll: 1, playSpeed: 1, offsetMs: 0, tabPos: 'off', tabZoom: 1,
   volMaster: 0.9, volBgm: 1, volNotes: 1,
   groups: { lc: false, lp: false, ft: false, rd: false },
   laneOrder: [...LANE_IDS],
@@ -74,6 +74,7 @@ function applyOffset() {
 function applySettings(p) {
   p.speed = settings.scroll;
   p.setTabPos(settings.tabPos);
+  p.setTabZoom(settings.tabZoom);
   p.setOffset((settings.offsetMs + chartOffset()) / 1000);
   p.setPlaySpeed(settings.playSpeed);
   p.setVolume(settings.volMaster);
@@ -393,6 +394,11 @@ async function openChart(song, chartInfo) {
       player.onFrame = onPlayerFrame;
       player.onEnded = () => { el.btnPlay.textContent = 'Play'; };
       player.onLoopChange = updateLoopUI;
+      player.onTabZoom = (z) => { // pinch / ctrl+wheel zoom on the strip
+        settings.tabZoom = Math.round(z * 100) / 100;
+        saveSettings();
+        refreshSteppers('tabZoom');
+      };
       player.onStretchProgress = (p) => {
         el.overlayText.textContent = `Time-stretching audio… ${Math.round(p * 100)}%`;
       };
@@ -501,6 +507,7 @@ function updateViewButton() {
   const btn = $('btn-view');
   btn.textContent = TAB_LABEL[settings.tabPos] || 'Tab: Off';
   btn.classList.toggle('active', settings.tabPos !== 'off');
+  $('tabzoom-wrap').hidden = settings.tabPos === 'off';
 }
 
 $('btn-view').onclick = () => {
@@ -515,10 +522,13 @@ function updateLoopUI(loop) {
   info.hidden = !loop;
   if (loop) {
     const pad = (n) => String(n).padStart(3, '0');
-    $('loop-text').textContent = `Loop ${pad(loop.startNum)}–${pad(loop.endNum)}`;
+    $('loop-text').textContent =
+      `Loop ${pad(loop.startNum)}–${pad(loop.endNum)}${loop.enabled ? '' : ' (off)'}`;
+    info.classList.toggle('disabled', !loop.enabled);
   }
 }
 
+$('loop-text').onclick = () => player?.toggleLoop();
 $('btn-loop-clear').onclick = () => player?.clearLoop();
 
 $('btn-restart').onclick = () => {
@@ -539,7 +549,7 @@ el.seek.addEventListener('change', () => {
 
 // ---- shared setting setters (keep the bottom bar and the panel in sync) ----
 
-const steppers = { scroll: [], playSpeed: [], offsetGlobal: [], offsetChart: [] };
+const steppers = { scroll: [], playSpeed: [], offsetGlobal: [], offsetChart: [], tabZoom: [] };
 const volEls = { volMaster: [], volBgm: [], volNotes: [] }; // range inputs
 
 function refreshSteppers(key) {
@@ -593,6 +603,13 @@ function setChartOffset(v) {
   refreshSteppers('offsetChart');
 }
 
+function setTabZoomSetting(v) {
+  settings.tabZoom = v;
+  saveSettings();
+  player?.setTabZoom(v);
+  refreshSteppers('tabZoom');
+}
+
 const VOL_APPLY = {
   volMaster: (p, v) => p.setVolume(v),
   volBgm: (p, v) => p.setBgmVolume(v),
@@ -627,6 +644,10 @@ const STEPPER_DEFS = {
     min: -1000, max: 1000, step: 5, fmt: fmtMs,
     get: chartOffset, apply: setChartOffset,
     enabled: () => !!currentChartKey, // needs a loaded chart
+  },
+  tabZoom: {
+    min: 0.25, max: 4, step: 0.25, fmt: fmtX,
+    get: () => settings.tabZoom, apply: setTabZoomSetting,
   },
 };
 
@@ -691,6 +712,7 @@ function makeStepper(key) {
 function initControlsFromSettings() {
   $('speed-stepper').append(makeStepper('scroll').el);
   $('playspeed-stepper').append(makeStepper('playSpeed').el);
+  $('tabzoom-stepper').append(makeStepper('tabZoom').el);
   for (const [key, id] of [['volMaster', 'vol'], ['volBgm', 'vol-bgm'], ['volNotes', 'vol-notes']]) {
     const input = $(id);
     input.value = settings[key];

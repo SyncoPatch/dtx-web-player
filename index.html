@@ -48,13 +48,14 @@
       <span id="time-total" class="time">0:00</span>
       <button id="btn-view" class="btn small toggle" title="Show drum sheet notation as a strip above or below the lanes — click measures on it to set a practice loop">Tab: Off</button>
       <span id="loop-info" hidden>
-        <span id="loop-text"></span>
+        <span id="loop-text" title="Click to toggle the loop on/off"></span>
         <button id="btn-loop-clear" class="btn small" title="Clear practice loop">&times;</button>
       </span>
     </div>
     <div class="controls-row secondary">
       <span class="slider-label">Scroll <span id="speed-stepper"></span></span>
       <span class="slider-label">Play&nbsp;speed <span id="playspeed-stepper"></span></span>
+      <span class="slider-label" id="tabzoom-wrap" hidden title="Tab strip zoom — also Ctrl+wheel / pinch over the strip">Tab&nbsp;zoom <span id="tabzoom-stepper"></span></span>
       <label class="slider-label">Notes
         <input type="range" id="vol-notes" min="0" max="1" step="0.01" value="1">
       </label>

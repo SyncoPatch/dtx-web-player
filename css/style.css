@@ -205,6 +205,12 @@ body {
   font-variant-numeric: tabular-nums;
 }
 #loop-info[hidden] { display: none; }
+#loop-text { cursor: pointer; }
+#loop-info.disabled {
+  background: rgba(165, 165, 180, 0.10);
+  border-color: rgba(165, 165, 180, 0.4);
+  color: var(--dim);
+}
 
 /* ---- steppers ---- */
 

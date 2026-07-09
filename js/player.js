@@ -153,6 +153,9 @@ export class Player {
                            // positive shifts notes later to compensate for
                            // audio output latency
     this.tabPos = 'off';   // tab strip position: 'off' | 'top' | 'bottom'
+    this.tabZoom = 1;      // tab horizontal zoom (0.25..4)
+    this._tabScroll = 0;   // paused-view scroll offset in song seconds
+    this._tabDrag = null;  // { anchorT, lastX, dragging } during strip drags
     this.loop = null;      // { startIdx, endIdx, startNum, endNum, startTime, endTime }
     this._tab = { cols: [], groups: [] };
     this.groups = { lc: false, lp: false, ft: false, rd: false };
@@ -176,27 +179,83 @@ export class Player {
     this.onEnded = null;
     this.onStretchProgress = null; // (0..1) while preparing time-stretch
     this.onLoopChange = null; // (loop | null) after loop edits
+    this.onTabZoom = null; // (zoom) after wheel/pinch zoom on the strip
 
-    // Clicking a measure inside the tab strip sets/extends/clears the
-    // practice loop.
-    canvas.addEventListener('click', (e) => {
+    // Tab strip interactions: click seeks to a measure; when paused, drag
+    // paints a measure-snapped practice loop (with edge auto-scroll) and the
+    // wheel scrolls the view; Ctrl+wheel / pinch zooms.
+    const inStrip = (e) => {
       const r = this._tabRegion();
-      if (!r || !this.bars.length || !this._cssW) return;
-      if (e.offsetY < r.top || e.offsetY > r.top + r.h) return;
-      const ppsH = (TAB_PPS * this.speed) / this.playSpeed;
-      const playheadX = this._cssW * 0.25;
-      const now = Math.min(this.time - this.offset, this.duration);
-      const t = now + (e.offsetX - playheadX) / ppsH;
-      if (t < 0 || t >= this.duration) return;
-      let idx = lowerBound(this.bars, t + 1e-9) - 1; // last bar at or before t
-      if (idx < 0) idx = 0;
-      this._loopClick(idx);
+      return r && e.offsetY >= r.top && e.offsetY <= r.top + r.h ? r : null;
+    };
+    canvas.addEventListener('pointerdown', (e) => {
+      if (!inStrip(e) || !this.bars.length) return;
+      const edge = this._loopEdgeAt(e.offsetX);
+      if (edge) {
+        // Resize: the opposite boundary stays fixed; anchoring inside its
+        // measure lets a drag past the other edge flip naturally.
+        const L = this.loop;
+        this._tabDrag = {
+          anchorT: this.bars[edge === 'start' ? L.endIdx : L.startIdx].time,
+          lastX: e.offsetX,
+          dragging: true,
+          keepEnabled: L.enabled,
+        };
+      } else {
+        this._tabDrag = {
+          anchorT: this._tabTimeAt(e.offsetX),
+          lastX: e.offsetX,
+          dragging: false,
+          keepEnabled: true,
+        };
+      }
+      canvas.setPointerCapture(e.pointerId);
     });
     canvas.addEventListener('pointermove', (e) => {
-      const r = this._tabRegion();
-      canvas.style.cursor =
-        r && e.offsetY >= r.top && e.offsetY <= r.top + r.h ? 'pointer' : '';
+      const d = this._tabDrag;
+      if (d) {
+        d.lastX = e.offsetX;
+        if (!d.dragging && !this.playing &&
+            Math.abs(this._tabTimeAt(e.offsetX) - d.anchorT) * this._tabPps() > 5) {
+          d.dragging = true;
+        }
+        if (d.dragging) this._loopFromTimes(d.anchorT, this._tabTimeAt(e.offsetX), d.keepEnabled);
+        return;
+      }
+      canvas.style.cursor = inStrip(e)
+        ? (this._loopEdgeAt(e.offsetX) ? 'ew-resize' : 'pointer')
+        : '';
     });
+    canvas.addEventListener('pointerup', (e) => {
+      const d = this._tabDrag;
+      this._tabDrag = null;
+      if (!d || d.dragging) return;
+      // Plain click: inside the loop region toggles it; elsewhere seeks to
+      // the start of the clicked measure.
+      const t = this._tabTimeAt(e.offsetX);
+      if (this.loop && t >= this.loop.startTime && t < this.loop.endTime) {
+        this.toggleLoop();
+        return;
+      }
+      if (t >= 0 && t < this.duration) {
+        let idx = lowerBound(this.bars, t + 1e-9) - 1;
+        if (idx < 0) idx = 0;
+        this.seek(this.bars[idx].time);
+      }
+    });
+    canvas.addEventListener('pointercancel', () => { this._tabDrag = null; });
+    canvas.addEventListener('wheel', (e) => {
+      if (!inStrip(e)) return;
+      e.preventDefault();
+      if (e.ctrlKey || e.metaKey) { // pinch gestures arrive as ctrl+wheel
+        this.setTabZoom(this.tabZoom * Math.exp(-e.deltaY * 0.0015));
+        this.onTabZoom?.(this.tabZoom);
+      } else if (!this.playing) {
+        const delta = Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY;
+        this._tabScroll += delta / this._tabPps();
+        this._clampTabScroll();
+      }
+    }, { passive: false });
 
     // Track the canvas CSS size via ResizeObserver instead of reading
     // clientWidth/Height every frame (those force a synchronous reflow
@@ -244,6 +303,7 @@ export class Player {
     this.startOffset = this.pausedAt;
     this.ctxStart = this.ctx.currentTime + START_DELAY;
     this.playing = true;
+    this._tabScroll = 0; // resume following the playhead
     this._resetPointers(this.startOffset);
 
     // Chips that started earlier but are still sounding (BGM after a seek,
@@ -279,6 +339,7 @@ export class Player {
     const wasPlaying = this.playing;
     this.pause();
     this.pausedAt = Math.max(0, Math.min(t, this.duration));
+    this._tabScroll = 0;
     this._resetPointers(this.pausedAt);
     if (wasPlaying) this.play();
   }
@@ -391,6 +452,49 @@ export class Player {
     if (this.tabPos === 'off') this.canvas.style.cursor = '';
   }
 
+  setTabZoom(z) {
+    this.tabZoom = Math.max(0.25, Math.min(4, z));
+  }
+
+  _tabPps() {
+    return TAB_PPS * this.tabZoom;
+  }
+
+  // Song time under canvas x, honoring the paused-view scroll offset.
+  _tabTimeAt(x) {
+    const now = Math.min(this.time - this.offset, this.duration);
+    const viewT = now + this._tabScroll;
+    return viewT + (x - this._cssW * 0.25) / this._tabPps();
+  }
+
+  _clampTabScroll() {
+    const now = Math.min(this.time - this.offset, this.duration);
+    this._tabScroll = Math.max(-now - 1, Math.min(this.duration - now + 1, this._tabScroll));
+  }
+
+  // Measure-snapped loop between two song times (either order).
+  _loopFromTimes(t1, t2, enabled = true) {
+    const idxOf = (t) => {
+      let i = lowerBound(this.bars, Math.max(0, t) + 1e-9) - 1;
+      return Math.max(0, Math.min(i, this.bars.length - 1));
+    };
+    this.setLoop(idxOf(Math.min(t1, t2)), idxOf(Math.max(t1, t2)), enabled);
+  }
+
+  // Canvas x of a song time in the tab strip's current view.
+  _tabXOf(t) {
+    const now = Math.min(this.time - this.offset, this.duration);
+    return this._cssW * 0.25 + (t - (now + this._tabScroll)) * this._tabPps();
+  }
+
+  // 'start' | 'end' when x is within grabbing range of a loop edge.
+  _loopEdgeAt(x) {
+    if (!this.loop || this.playing) return null;
+    if (Math.abs(x - this._tabXOf(this.loop.startTime)) <= 7) return 'start';
+    if (Math.abs(x - this._tabXOf(this.loop.endTime)) <= 7) return 'end';
+    return null;
+  }
+
   // Tab strip rectangle in CSS px, or null when hidden / canvas too short.
   _tabRegion() {
     if (this.tabPos === 'off') return null;
@@ -399,8 +503,9 @@ export class Player {
     return { top: this.tabPos === 'top' ? 0 : H - TAB_STRIP_H, h: TAB_STRIP_H };
   }
 
-  // Practice loop over whole measures (bar indices, inclusive).
-  setLoop(startIdx, endIdx) {
+  // Practice loop over whole measures (bar indices, inclusive). A disabled
+  // loop keeps its region (drawn grey) but does not affect playback.
+  setLoop(startIdx, endIdx, enabled = true) {
     const last = this.bars.length - 1;
     if (last < 0) return;
     const a = Math.max(0, Math.min(startIdx, last));
@@ -412,23 +517,20 @@ export class Player {
       endNum: this.bars[b].num,
       startTime: this.bars[a].time,
       endTime: this.bars[b + 1]?.time ?? this.duration,
+      enabled,
     };
+    this.onLoopChange?.(this.loop);
+  }
+
+  toggleLoop() {
+    if (!this.loop) return;
+    this.loop = { ...this.loop, enabled: !this.loop.enabled };
     this.onLoopChange?.(this.loop);
   }
 
   clearLoop() {
     this.loop = null;
     this.onLoopChange?.(null);
-  }
-
-  // First click starts a one-measure loop, clicking outside extends it,
-  // clicking inside clears it.
-  _loopClick(idx) {
-    const L = this.loop;
-    if (!L) this.setLoop(idx, idx);
-    else if (idx < L.startIdx) this.setLoop(idx, L.endIdx);
-    else if (idx > L.endIdx) this.setLoop(L.startIdx, idx);
-    else this.clearLoop();
   }
 
   // Completely hide individual lanes (their chips are not drawn; audio is
@@ -554,7 +656,7 @@ export class Player {
 
   _tick() {
     const now = this.time;
-    if (this.loop && now >= this.loop.endTime - 0.005) {
+    if (this.loop?.enabled && now >= this.loop.endTime - 0.005) {
       this.seek(this.loop.startTime);
       return;
     }
@@ -837,25 +939,47 @@ export class Player {
   // Drum sheet notation strip (drum-game style): a five-line staff scrolls
   // right-to-left past a fixed playhead. Rendered into [yTop, yTop+tabH).
   _renderTab(g, W, yTop, tabH, now) {
-    const ppsH = (TAB_PPS * this.speed) / this.playSpeed;
+    const ppsH = this._tabPps();
     const playheadX = Math.round(W * 0.25);
+
+    // Edge auto-scroll while dragging a loop selection past either side.
+    const drag = this._tabDrag;
+    if (drag?.dragging && !this.playing) {
+      const margin = 44;
+      let push = 0;
+      if (drag.lastX < margin) push = drag.lastX - margin;
+      else if (drag.lastX > W - margin) push = drag.lastX - (W - margin);
+      if (push) {
+        this._tabScroll += Math.max(-60, Math.min(60, push)) * 0.15 / ppsH;
+        this._clampTabScroll();
+        this._loopFromTimes(drag.anchorT, this._tabTimeAt(drag.lastX), drag.keepEnabled);
+      }
+    }
+
+    if (this.playing) this._tabScroll = 0;
+    const viewT = now + this._tabScroll;
     const G = TAB_GAP;
     const staffTop = Math.round(yTop + 60);
     const yOfP = (p) => staffTop + (p * G) / 2;
-    const xOf = (t) => playheadX + (t - now) * ppsH;
-    const tMin = now - playheadX / ppsH - 0.5;
-    const tMax = now + (W - playheadX) / ppsH + 0.5;
+    const xOf = (t) => playheadX + (t - viewT) * ppsH;
+    const tMin = viewT - playheadX / ppsH - 0.5;
+    const tMax = viewT + (W - playheadX) / ppsH + 0.5;
 
-    // Practice-loop highlight.
+    // Practice-loop highlight (grey while temporarily disabled). Edge
+    // handles hint that the boundaries are draggable.
     if (this.loop) {
+      const on = this.loop.enabled;
       const xa = Math.max(0, xOf(this.loop.startTime));
       const xb = Math.min(W, xOf(this.loop.endTime));
       if (xb > xa) {
-        g.fillStyle = 'rgba(77,163,255,0.10)';
+        g.fillStyle = on ? 'rgba(77,163,255,0.10)' : 'rgba(165,165,180,0.08)';
         g.fillRect(xa, yTop + 4, xb - xa, tabH - 8);
-        g.fillStyle = 'rgba(77,163,255,0.55)';
-        for (const x of [xOf(this.loop.startTime), xOf(this.loop.endTime)]) {
-          if (x >= -2 && x <= W + 2) g.fillRect(Math.round(x) - 1, yTop + 4, 2, tabH - 8);
+      }
+      g.fillStyle = on ? 'rgba(77,163,255,0.55)' : 'rgba(165,165,180,0.45)';
+      for (const x of [xOf(this.loop.startTime), xOf(this.loop.endTime)]) {
+        if (x >= -8 && x <= W + 8) {
+          g.fillRect(Math.round(x) - 1, yTop + 4, 2, tabH - 8);
+          g.fillRect(Math.round(x) - 3, yTop + tabH / 2 - 12, 6, 24); // grip
         }
       }
     }
@@ -899,9 +1023,12 @@ export class Player {
       g.stroke();
     }
 
-    // Playhead.
-    g.fillStyle = '#ff4d4d';
-    g.fillRect(playheadX - 1, yTop + 4, 2, tabH - 28);
+    // Playhead at its true song position (off-center while scrolled).
+    const phX = xOf(now);
+    if (phX >= -2 && phX <= W + 2) {
+      g.fillStyle = '#ff4d4d';
+      g.fillRect(Math.round(phX) - 1, yTop + 4, 2, tabH - 28);
+    }
 
     const { cols, groups } = this._tab;
 
