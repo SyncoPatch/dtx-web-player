@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DTX Web Player</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+
+<main id="screen-select" class="screen">
+  <header class="topbar">
+    <h1>DTX Web Player</h1>
+    <div class="actions">
+      <button id="btn-import-zip" class="btn primary">Import ZIP</button>
+      <button id="btn-import-url" class="btn">Import URL</button>
+      <button id="btn-import-folder" class="btn">Import Folder</button>
+      <button id="btn-settings" class="btn">Settings</button>
+    </div>
+  </header>
+  <p id="empty-hint" hidden>
+    No songs yet. Import a ZIP containing .dtx chart files and their audio
+    (OGG / WAV / MP3). Imported songs are stored in this browser so they stay
+    available next time.
+  </p>
+  <ul id="song-list"></ul>
+  <input type="file" id="file-zip" accept=".zip,application/zip" multiple hidden>
+  <input type="file" id="file-folder" webkitdirectory hidden>
+</main>
+
+<main id="screen-player" class="screen" hidden>
+  <header class="topbar">
+    <button id="btn-back" class="btn">&larr; Songs</button>
+    <div id="np-info">
+      <span id="np-title"></span>
+      <span id="np-sub"></span>
+    </div>
+    <span id="np-warn" title=""></span>
+  </header>
+  <div id="canvas-wrap"><canvas id="chart"></canvas></div>
+  <div id="controls">
+    <div class="controls-row">
+      <button id="btn-play" class="btn primary wide">Play</button>
+      <button id="btn-restart" class="btn" title="Restart">&#10226;</button>
+      <span id="time-cur" class="time">0:00</span>
+      <input type="range" id="seek" min="0" max="1000" value="0" step="1">
+      <span id="time-total" class="time">0:00</span>
+    </div>
+    <div class="controls-row secondary">
+      <span class="slider-label">Scroll <span id="speed-stepper"></span></span>
+      <span class="slider-label">Play&nbsp;speed <span id="playspeed-stepper"></span></span>
+      <label class="slider-label">Notes
+        <input type="range" id="vol-notes" min="0" max="1" step="0.01" value="1">
+      </label>
+      <label class="slider-label">BGM
+        <input type="range" id="vol-bgm" min="0" max="1" step="0.01" value="1">
+      </label>
+      <label class="slider-label">Master
+        <input type="range" id="vol" min="0" max="1" step="0.01" value="0.9">
+      </label>
+      <button id="btn-lanes" class="btn small">Settings&hellip;</button>
+    </div>
+  </div>
+
+</main>
+
+<div id="lane-panel" hidden>
+  <div class="panel-box">
+    <div class="panel-head">
+      <h2>Settings</h2>
+      <button id="lane-panel-close" class="btn small" title="Close">&times;</button>
+    </div>
+    <div class="panel-cols">
+      <section>
+        <h3>Playback</h3>
+        <div id="playback-opts"></div>
+      </section>
+      <section>
+        <h3>Lane order &amp; grouping</h3>
+        <ul id="lane-order"></ul>
+      </section>
+      <section>
+        <h3>Note colors</h3>
+        <div id="note-colors"></div>
+      </section>
+      <section>
+        <h3>Display</h3>
+        <div id="display-opts"></div>
+      </section>
+    </div>
+    <div class="panel-foot">
+      <button id="lane-reset" class="btn small">Reset to defaults</button>
+    </div>
+  </div>
+</div>
+
+<div id="overlay" hidden>
+  <div class="overlay-box">
+    <div class="spinner"></div>
+    <div id="overlay-text">Loading…</div>
+  </div>
+</div>
+
+<script type="module" src="js/main.js"></script>
+</body>
+</html>
