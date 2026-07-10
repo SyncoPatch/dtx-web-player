@@ -100,10 +100,45 @@ const LOOKAHEAD = 0.35;   // real seconds of audio scheduled ahead
 const TICK_MS = 60;       // scheduler interval
 const START_DELAY = 0.08; // gap between pressing play and audio start
 const BASE_PPS = 260;     // scroll pixels/second at scroll speed 1.0
+const CHIP_FRAME_MS = 70; // DTXManiaNX drum chip animation cadence
+const CHIP_SRC_H = 64;
+const CHIP_BODY_Y = 0;
+const CHIP_PATTERN_Y = 128;
+const CHIP_BODY_PAD_X = 5;
+
+const CHIP_IMAGE = new Image();
+CHIP_IMAGE.src = 'icons/chips_drums.png';
+
+const CHIP_FIRE_DIR = 'icons/ScreenPlayDrums chip fire/';
+const CHIP_FIRE_TYPES = ['BD', 'CY', 'FT', 'HH', 'HT', 'LC', 'LP', 'LT', 'RD', 'SD'];
+const CHIP_FIRE_ALIAS = {
+  OH: 'HH',
+  LBD: 'BD',
+};
+const CHIP_FIRE_IMAGES = Object.fromEntries(CHIP_FIRE_TYPES.map((type) => {
+  const image = new Image();
+  image.src = `${CHIP_FIRE_DIR}ScreenPlayDrums chip fire_${type}.png`;
+  return [type, image];
+}));
+
+const CHIP_RECTS = {
+  BD: { x: 0, w: 70 },
+  HH: { x: 70, w: 56 },
+  OH: { x: 612, w: 48 },
+  SD: { x: 126, w: 64 },
+  HT: { x: 190, w: 56 },
+  LT: { x: 246, w: 56 },
+  FT: { x: 302, w: 56 },
+  CY: { x: 358, w: 74 },
+  RD: { x: 432, w: 48 },
+  LBD: { x: 480, w: 58 },
+  LC: { x: 538, w: 74 },
+  LP: { x: 660, w: 58 },
+};
 
 // At playSpeed != 1, sounds longer than this are pitch-preserving
 // time-stretched (BGM, long pads). Shorter one-shots (drum hits, SE) play
-// unmodified â€” only their trigger times change â€” which keeps transients and
+// unmodified â€?only their trigger times change â€?which keeps transients and
 // pitch perfect, like DTXMania's timestretch mode.
 const STRETCH_MIN_SECONDS = 4;
 
@@ -115,6 +150,57 @@ function lowerBound(arr, t) {
     else hi = mid;
   }
   return lo;
+}
+
+function chipFrame(now) {
+  return Math.floor((now * 1000) / CHIP_FRAME_MS) & 7;
+}
+
+function drawFallbackNote(g, n, x, y, w, h, color) {
+  if (n.ch === 0x18) {
+    g.strokeStyle = color;
+    g.lineWidth = 2.5;
+    g.strokeRect(x + 1, y - h / 2 + 1, w - 2, h - 2);
+    return;
+  }
+  g.fillStyle = color;
+  g.fillRect(x, y - h / 2, w, h);
+  g.fillStyle = 'rgba(255,255,255,0.45)';
+  g.fillRect(x, y - h / 2, w, 2);
+}
+
+function drawChipNote(g, n, x, y, w, color, frame) {
+  const key = CH_TYPE.get(n.ch);
+  const rect = CHIP_RECTS[key];
+  if (!rect || !CHIP_IMAGE.complete || !CHIP_IMAGE.naturalWidth) {
+    drawFallbackNote(g, n, x, y, w, 11, color);
+    return;
+  }
+
+  const patternY = CHIP_PATTERN_Y + frame * CHIP_SRC_H;
+  const destH = Math.max(44, Math.min(70, w * 0.95));
+  const visibleSrcW = rect.w - CHIP_BODY_PAD_X * 2;
+  const destW = w * rect.w / visibleSrcW;
+  const dx = x - CHIP_BODY_PAD_X * destW / rect.w;
+  const dy = y - destH / 2;
+
+  g.drawImage(CHIP_IMAGE, rect.x, patternY, rect.w, CHIP_SRC_H, dx, dy, destW, destH);
+  g.drawImage(CHIP_IMAGE, rect.x, CHIP_BODY_Y, rect.w, CHIP_SRC_H, dx, dy, destW, destH);
+}
+
+function drawChipFire(g, type, x, y, w, alpha) {
+  const key = CHIP_FIRE_ALIAS[type] || type;
+  const image = CHIP_FIRE_IMAGES[key];
+  if (!image || !image.complete || !image.naturalWidth) return;
+
+  const size = Math.max(96, Math.min(150, w * 1.9));
+  const prevAlpha = g.globalAlpha;
+  const prevComposite = g.globalCompositeOperation;
+  g.globalAlpha = alpha;
+  g.globalCompositeOperation = 'screen';
+  g.drawImage(image, x + w / 2 - size / 2, y - size / 2, size, size);
+  g.globalCompositeOperation = prevComposite;
+  g.globalAlpha = prevAlpha;
 }
 
 export class Player {
@@ -383,7 +469,7 @@ export class Player {
     this._resetPointers(this.startOffset);
 
     // Chips that started earlier but are still sounding (BGM after a seek,
-    // long cymbal tails, â€¦) restart at the right offset into their buffer.
+    // long cymbal tails, â€? restart at the right offset into their buffer.
     // song seconds -> real buffer seconds is /playSpeed for both stretched
     // buffers and unmodified one-shots.
     this._schedIdx = 0;
@@ -420,7 +506,7 @@ export class Player {
     if (wasPlaying) this.play();
   }
 
-  // True if changing to speed v involves (re)stretching audio â€” callers can
+  // True if changing to speed v involves (re)stretching audio â€?callers can
   // use this to decide whether to show a busy indicator.
   needsStretch(v = this.playSpeed) {
     if (Math.abs(v - 1) < 1e-6) return false;
@@ -661,7 +747,7 @@ export class Player {
       const lane = this.chToLane.get(c.ch);
       if (lane !== undefined) this.notes.push({ time: c.time, lane, ch: c.ch });
     }
-    this._laneFlash = new Array(this.lanes.length).fill(-Infinity);
+    this._laneFlash = new Array(this.lanes.length).fill(null);
     this._resetPointers(this.playing ? this.time : this.pausedAt);
   }
 
@@ -727,7 +813,7 @@ export class Player {
   _resetPointers(t) {
     // The flash pointer tracks the (offset-shifted) display clock.
     this._visIdx = lowerBound(this.notes, t - this.offset);
-    this._laneFlash.fill(-Infinity);
+    this._laneFlash.fill(null);
   }
 
   _tick() {
@@ -946,28 +1032,30 @@ export class Player {
 
     // Advance the "hit" pointer for lane flashes.
     while (this._visIdx < this.notes.length && this.notes[this._visIdx].time <= now) {
-      this._laneFlash[this.notes[this._visIdx].lane] = this.notes[this._visIdx].time;
+      const note = this.notes[this._visIdx];
+      this._laneFlash[note.lane] = {
+        time: note.time,
+        type: CH_TYPE.get(note.ch) || lanes[note.lane]?.id,
+      };
       this._visIdx++;
     }
 
     // Lane hit flashes.
     if (disp.laneFlash && dark !== 'full') {
       for (let i = 0; i < lanes.length; i++) {
-        const dt = now - this._laneFlash[i];
+        const flash = this._laneFlash[i];
+        const dt = now - (flash?.time ?? -Infinity);
         if (dt >= 0 && dt < 0.15) {
           const a = 1 - dt / 0.15;
-          g.fillStyle = this.colors[lanes[i].id];
-          g.globalAlpha = a * 0.55;
           const lw = lanes[i].w * unit;
-          g.fillRect(laneX[i] + 2, hitY - 26, lw - 4, 52);
-          g.globalAlpha = 1;
+          drawChipFire(g, flash.type || lanes[i].id, laneX[i], hitY, lw, a);
         }
       }
     }
 
-    // Notes. Chips merged in from a grouped lane keep their own color and
-    // draw slightly inset so they read as "foreign" on the target lane.
-    const noteH = 11;
+    // Notes. Chips merged in from a grouped lane keep their own source sprite
+    // and draw slightly inset so they read as "foreign" on the target lane.
+    const frame = chipFrame(now);
     for (let i = lowerBound(this.notes, tMin); i < this.notes.length; i++) {
       const n = this.notes[i];
       if (n.time > tMax) break;
@@ -981,20 +1069,10 @@ export class Player {
       const lane = lanes[n.lane];
       const foreign = !lane.channels.includes(n.ch);
       const inset = foreign ? Math.round(lane.w * unit * 0.12) : 0;
-      const lx = laneX[n.lane] + 3 + inset;
-      const lw = lane.w * unit - 6 - inset * 2;
+      const lx = laneX[n.lane] + inset;
+      const lw = lane.w * unit - inset * 2;
       const color = this.colors[CH_TYPE.get(n.ch)] || this.colors[lane.id];
-      if (n.ch === 0x18) {
-        // Open hi-hat: hollow note.
-        g.strokeStyle = color;
-        g.lineWidth = 2.5;
-        g.strokeRect(lx + 1, y - noteH / 2 + 1, lw - 2, noteH - 2);
-      } else {
-        g.fillStyle = color;
-        g.fillRect(lx, y - noteH / 2, lw, noteH);
-        g.fillStyle = 'rgba(255,255,255,0.45)';
-        g.fillRect(lx, y - noteH / 2, lw, 2);
-      }
+      drawChipNote(g, n, lx, y, lw, color, frame);
     }
 
     // Lane labels sit just past the hit line.
