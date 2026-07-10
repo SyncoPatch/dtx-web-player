@@ -1,6 +1,6 @@
 # DTX Web Player
 
-**Live: <https://sileyin.github.io/dtx-web-player/>** — works on desktop and
+**Live: <https://syncopatch.github.io/dtx-web-player/>** — works on desktop and
 iPad (installable as a Home-Screen app). Deploys automatically on push to
 `main`; bump `VERSION` in `sw.js` when shell files change so installed PWAs
 pick up the update.
