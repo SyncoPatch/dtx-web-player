@@ -197,9 +197,25 @@ const SYS_BELOW = 44;        // room below (feet stems/beams, pedal)
 const SYS_ADVANCE = SYS_ABOVE + 4 * G + SYS_BELOW;
 const STEM = 22;
 const HEAD_RX = 3.4, HEAD_RY = 2.5;
+const MEAS_LEAD = 12, MEAS_TRAIL = 7;
 
-function measureWidthWeight(meas) {
-  return Math.max(55, 22 + 10.5 * meas.cols.length + (meas.wholeRest ? 20 : 0));
+// Horizontal room a beat needs, in abstract units: every note column, rest
+// glyph, and grace note reserves space so dense beats spread out instead of
+// colliding. Exported for tests.
+export function beatUnits(beat) {
+  let u = Math.max(1, beat.cols.length);
+  u += 0.8 * beat.rests.length;
+  if (beat.cols.some((c) => c.graces.length)) u += 0.7;
+  return u;
+}
+
+function beatDesiredWidth(beat) {
+  return 12 + 9.5 * beatUnits(beat);
+}
+
+function measureDesiredWidth(meas) {
+  if (meas.wholeRest) return 60;
+  return MEAS_LEAD + MEAS_TRAIL + meas.spans.reduce((a, b) => a + beatDesiredWidth(b), 0);
 }
 
 export async function buildScorePdf(data, opts = {}) {
@@ -212,7 +228,7 @@ export async function buildScorePdf(data, opts = {}) {
   {
     let sys = null;
     for (const meas of model.measures) {
-      const w = measureWidthWeight(meas);
+      const w = measureDesiredWidth(meas);
       if (!sys || (sys.weight + w > contentW - 22 && sys.items.length)) {
         sys = { items: [], weight: 0 };
         systems.push(sys);
@@ -294,7 +310,7 @@ export async function buildScorePdf(data, opts = {}) {
       page.setLineWidth(0.8);
       page.line(mx, yOfP(0), mx, yOfP(8)); // left barline
 
-      let lead = 12;
+      let lead = MEAS_LEAD;
       // Time signature on meter change.
       if (meas.meter && (!prevMeter || meas.meter[0] !== prevMeter[0] || meas.meter[1] !== prevMeter[1])) {
         page.text(mx + 8, yOfP(2) + 4.5, String(meas.meter[0]), { size: 13, font: 'B', align: 'center' });
@@ -303,9 +319,19 @@ export async function buildScorePdf(data, opts = {}) {
       }
       if (meas.meter) prevMeter = meas.meter;
 
-      const span = mw - lead - 7;
-      const n = meas.spans.length;
-      const xOfBeat = (bi, frac) => mx + lead + ((bi + frac) / n) * span;
+      // Distribute the measure's span across beats proportionally to their
+      // content so dense beats get more room than sparse ones.
+      const span = mw - lead - MEAS_TRAIL;
+      const desired = meas.spans.map(beatDesiredWidth);
+      const dSum = desired.reduce((a, b) => a + b, 0);
+      const beatW = desired.map((d) => (d / dSum) * span);
+      const beatX = [];
+      {
+        let acc = mx + lead;
+        for (const w of beatW) { beatX.push(acc); acc += w; }
+      }
+      // frac 0 sits slightly inside the beat; the tail leaves a natural gap.
+      const xOfBeat = (bi, frac) => beatX[bi] + beatW[bi] * (0.06 + frac * 0.84);
 
       if (meas.wholeRest) {
         page.rect(mx + lead + span / 2 - 5, yOfP(2), 10, 3, true);
@@ -465,7 +491,7 @@ function drawFlagged(page, f, yOfP) {
 }
 
 function drawGrace(page, x, yOfP, gr) {
-  const gx = x - 7.5;
+  const gx = x - 8.5;
   const gy = yOfP(gr.p);
   page.ellipse(gx, gy, 2, 1.5, true);
   page.setLineWidth(0.7);

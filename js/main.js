@@ -334,6 +334,11 @@ async function renderSongList() {
     title.className = 'song-title';
     title.textContent = song.title;
     title.title = song.title;
+    const menuBtn = document.createElement('button');
+    menuBtn.className = 'btn small card-menu-btn';
+    menuBtn.textContent = '⋯';
+    menuBtn.title = 'More actions';
+    menuBtn.onclick = () => showCardMenu(menuBtn, song);
     const del = document.createElement('button');
     del.className = 'btn small danger';
     del.textContent = 'Delete';
@@ -347,7 +352,7 @@ async function renderSongList() {
       if (pruned) localStorage.setItem(CHART_OFFSETS_KEY, JSON.stringify(chartOffsets));
       renderSongList();
     };
-    head.append(title, del);
+    head.append(title, menuBtn, del);
 
     const meta = document.createElement('div');
     meta.className = 'song-meta';
@@ -376,6 +381,45 @@ async function renderSongList() {
     el.songList.append(li);
   }
 }
+
+// ---- song card menu ----
+
+let openMenu = null;
+
+function closeCardMenu() {
+  openMenu?.remove();
+  openMenu = null;
+}
+
+function showCardMenu(btn, song) {
+  const reopen = openMenu?.dataset.songId !== song.id;
+  closeCardMenu();
+  if (!reopen) return; // second click on the same ⋯ toggles closed
+  const menu = document.createElement('div');
+  menu.className = 'card-menu';
+  menu.dataset.songId = song.id;
+  for (const d of song.dtxs) {
+    const item = document.createElement('button');
+    item.className = 'card-menu-item';
+    item.textContent = `Export PDF — ${d.label || d.title || basename(d.path)}`;
+    item.onclick = () => {
+      closeCardMenu();
+      exportChartPdfFromLibrary(song, d);
+    };
+    menu.append(item);
+  }
+  const r = btn.getBoundingClientRect();
+  menu.style.top = `${r.bottom + 4}px`;
+  menu.style.left = `${Math.max(8, Math.min(r.left, window.innerWidth - 250))}px`;
+  document.body.append(menu);
+  openMenu = menu;
+}
+
+document.addEventListener('pointerdown', (e) => {
+  if (openMenu && !openMenu.contains(e.target) && !e.target.closest?.('.card-menu-btn')) {
+    closeCardMenu();
+  }
+});
 
 // ---- playback ----
 
@@ -547,21 +591,20 @@ function textToImage(text, sizePt, bold) {
   return { width: w, height: h, data: rgb, pxWidth: w / scale, pxHeight: h / scale };
 }
 
-$('btn-pdf').onclick = async () => {
-  if (!currentDtx) return;
+async function exportPdf(dtx, meta) {
   try {
     showOverlay('Generating PDF…');
     const { buildScorePdf } = await import('./score.js');
     const bytes = await buildScorePdf({
-      title: currentMeta.title,
-      artist: currentMeta.artist,
-      bpm: currentMeta.bpm,
-      level: currentMeta.level,
-      chips: currentDtx.chips,
-      bars: currentDtx.bars,
-      beats: currentDtx.beats,
+      title: meta.title,
+      artist: meta.artist,
+      bpm: meta.bpm,
+      level: meta.level,
+      chips: dtx.chips,
+      bars: dtx.bars,
+      beats: dtx.beats,
     }, { textToImage });
-    const name = `${currentMeta.title}${currentMeta.label ? ` (${currentMeta.label})` : ''}`
+    const name = `${meta.title}${meta.label ? ` (${meta.label})` : ''}`
       .replace(/[\\/:*?"<>|]+/g, '_').slice(0, 120) || 'score';
     const url = URL.createObjectURL(new Blob([bytes], { type: 'application/pdf' }));
     const a = document.createElement('a');
@@ -576,7 +619,34 @@ $('btn-pdf').onclick = async () => {
     alert(`Failed to generate PDF:\n${err.message}`);
   }
   hideOverlay();
+}
+
+$('btn-pdf').onclick = () => {
+  if (currentDtx) exportPdf(currentDtx, currentMeta);
 };
+
+// Export straight from the library: parse the chart on demand (no audio).
+async function exportChartPdfFromLibrary(song, chartInfo) {
+  try {
+    showOverlay('Loading chart…');
+    const stored = await getSongFiles(song.id);
+    const fileMap = new Map(stored.map((f) => [f.path, f.blob]));
+    const blob = fileMap.get(chartInfo.path);
+    if (!blob) throw new Error('Chart file missing from local storage.');
+    const dtx = parseDTX(decodeText(await blob.arrayBuffer()));
+    await exportPdf(dtx, {
+      title: dtx.title || song.title,
+      artist: dtx.artist,
+      bpm: dtx.bpm,
+      level: fmtLevel(dtx.level),
+      label: chartInfo.label,
+    });
+  } catch (err) {
+    console.error(err);
+    hideOverlay();
+    alert(`Failed to export PDF:\n${err.message}`);
+  }
+}
 
 // ---- tab strip & practice loop ----
 
@@ -1039,7 +1109,8 @@ $('lane-reset').onclick = () => {
 
 document.addEventListener('keydown', (e) => {
   if (e.code === 'Escape') {
-    if (!lanePanel.hidden) lanePanel.hidden = true;
+    if (openMenu) closeCardMenu();
+    else if (!lanePanel.hidden) lanePanel.hidden = true;
     else if (!el.screenPlayer.hidden) backToSelect();
     return;
   }
