@@ -441,6 +441,16 @@ async function openChart(song, chartInfo) {
 
     await player.play();
     el.btnPlay.textContent = 'Pause';
+
+    // iOS: if decoding took long enough that the resume fell outside the
+    // original tap gesture, the context may still be suspended. Show "Play"
+    // and let the next tap (a real gesture) start audio.
+    if (player.ctx.state !== 'running') {
+      player.pause();
+      el.btnPlay.textContent = 'Play';
+      const retry = () => { player?.ctx.resume().catch(() => {}); };
+      document.addEventListener('pointerdown', retry, { once: true });
+    }
   } catch (err) {
     console.error(err);
     hideOverlay();
@@ -976,6 +986,10 @@ document.addEventListener('keydown', (e) => {
 // ---- init ----
 
 navigator.storage?.persist?.().catch(() => {});
+// PWA app shell (HTTPS only, so serve.py development stays cache-free).
+if ('serviceWorker' in navigator && location.protocol === 'https:') {
+  navigator.serviceWorker.register('sw.js').catch(() => {});
+}
 initControlsFromSettings();
 updateViewButton();
 renderSongList();

@@ -124,6 +124,15 @@ export class Player {
 
     const AC = window.AudioContext || window.webkitAudioContext;
     this.ctx = new AC();
+    // iOS unlocks audio only inside a user gesture. The Player is created in
+    // a click/tap handler, so resume immediately and play one silent frame.
+    this.ctx.resume().catch(() => {});
+    try {
+      const unlock = this.ctx.createBufferSource();
+      unlock.buffer = this.ctx.createBuffer(1, 1, this.ctx.sampleRate);
+      unlock.connect(this.ctx.destination);
+      unlock.start(0);
+    } catch { /* not fatal */ }
     this.master = this.ctx.createGain();
     this.master.gain.value = 0.9;
     this.master.connect(this.ctx.destination);
@@ -155,7 +164,9 @@ export class Player {
     this.tabPos = 'off';   // tab strip position: 'off' | 'top' | 'bottom'
     this.tabZoom = 1;      // tab horizontal zoom (0.25..4)
     this._tabScroll = 0;   // paused-view scroll offset in song seconds
-    this._tabDrag = null;  // { anchorT, lastX, dragging } during strip drags
+    this._tabDrag = null;  // { mode, anchorT, lastX, ... } during strip drags
+    this._tabPointers = new Map(); // active touch pointers on the strip
+    this._pinch = null;    // { d0, z0 } during two-finger pinch zoom
     this.loop = null;      // { startIdx, endIdx, startNum, endNum, startTime, endTime }
     this._tab = { cols: [], groups: [] };
     this.groups = { lc: false, lp: false, ft: false, rd: false };
@@ -181,57 +192,118 @@ export class Player {
     this.onLoopChange = null; // (loop | null) after loop edits
     this.onTabZoom = null; // (zoom) after wheel/pinch zoom on the strip
 
-    // Tab strip interactions: click seeks to a measure; when paused, drag
-    // paints a measure-snapped practice loop (with edge auto-scroll) and the
-    // wheel scrolls the view; Ctrl+wheel / pinch zooms.
+    // Tab strip interactions.
+    // Mouse: click seeks / toggles the loop region; drag (paused) paints a
+    //   measure-snapped loop; edge grips resize; wheel scrolls; ctrl+wheel
+    //   zooms.
+    // Touch: tap seeks / toggles; one-finger drag (paused) pans the view;
+    //   press-and-hold then drag paints a loop; two-finger pinch zooms;
+    //   edge grips (wider hit area) resize immediately.
     const inStrip = (e) => {
       const r = this._tabRegion();
       return r && e.offsetY >= r.top && e.offsetY <= r.top + r.h ? r : null;
     };
+    const startResize = (edge) => {
+      // Resize: the opposite boundary stays fixed; anchoring inside its
+      // measure lets a drag past the other edge flip naturally.
+      const L = this.loop;
+      return {
+        mode: 'resize',
+        anchorT: this.bars[edge === 'start' ? L.endIdx : L.startIdx].time,
+        keepEnabled: L.enabled,
+      };
+    };
+    const clearDrag = () => {
+      if (this._tabDrag?.timer) clearTimeout(this._tabDrag.timer);
+      this._tabDrag = null;
+    };
+
     canvas.addEventListener('pointerdown', (e) => {
       if (!inStrip(e) || !this.bars.length) return;
-      const edge = this._loopEdgeAt(e.offsetX);
-      if (edge) {
-        // Resize: the opposite boundary stays fixed; anchoring inside its
-        // measure lets a drag past the other edge flip naturally.
-        const L = this.loop;
-        this._tabDrag = {
-          anchorT: this.bars[edge === 'start' ? L.endIdx : L.startIdx].time,
-          lastX: e.offsetX,
-          dragging: true,
-          keepEnabled: L.enabled,
-        };
-      } else {
-        this._tabDrag = {
-          anchorT: this._tabTimeAt(e.offsetX),
-          lastX: e.offsetX,
-          dragging: false,
-          keepEnabled: true,
-        };
-      }
-      canvas.setPointerCapture(e.pointerId);
-    });
-    canvas.addEventListener('pointermove', (e) => {
-      const d = this._tabDrag;
-      if (d) {
-        d.lastX = e.offsetX;
-        if (!d.dragging && !this.playing &&
-            Math.abs(this._tabTimeAt(e.offsetX) - d.anchorT) * this._tabPps() > 5) {
-          d.dragging = true;
+      try { canvas.setPointerCapture(e.pointerId); } catch { /* synthetic events */ }
+      const touch = e.pointerType === 'touch';
+
+      if (touch) {
+        this._tabPointers.set(e.pointerId, { x: e.offsetX, y: e.offsetY });
+        if (this._tabPointers.size === 2) {
+          // Second finger: switch to pinch-zoom, abandon any drag.
+          clearDrag();
+          const [a, b] = [...this._tabPointers.values()];
+          this._pinch = { d0: Math.hypot(a.x - b.x, a.y - b.y) || 1, z0: this.tabZoom };
+          return;
         }
-        if (d.dragging) this._loopFromTimes(d.anchorT, this._tabTimeAt(e.offsetX), d.keepEnabled);
+        if (this._tabPointers.size > 2) return;
+      }
+
+      const edge = this._loopEdgeAt(e.offsetX, touch ? 16 : 7);
+      const base = { lastX: e.offsetX, startX: e.offsetX, touch, timer: 0 };
+      if (edge && !this.playing) {
+        this._tabDrag = { ...base, ...startResize(edge) };
+      } else {
+        const d = {
+          ...base,
+          mode: 'pending',
+          anchorT: this._tabTimeAt(e.offsetX),
+          keepEnabled: true,
+          startScroll: this._tabScroll,
+        };
+        if (touch && !this.playing) {
+          // Press-and-hold turns the pending tap into loop painting.
+          d.timer = setTimeout(() => {
+            if (this._tabDrag === d && d.mode === 'pending' && !this.playing) {
+              d.mode = 'paint';
+              this._loopFromTimes(d.anchorT, d.anchorT, true);
+            }
+          }, 400);
+        }
+        this._tabDrag = d;
+      }
+    });
+
+    canvas.addEventListener('pointermove', (e) => {
+      if (e.pointerType === 'touch' && this._tabPointers.has(e.pointerId)) {
+        this._tabPointers.set(e.pointerId, { x: e.offsetX, y: e.offsetY });
+        if (this._pinch && this._tabPointers.size >= 2) {
+          const [a, b] = [...this._tabPointers.values()];
+          const dist = Math.hypot(a.x - b.x, a.y - b.y) || 1;
+          this.setTabZoom(this._pinch.z0 * (dist / this._pinch.d0));
+          this.onTabZoom?.(this.tabZoom);
+          return;
+        }
+      }
+      const d = this._tabDrag;
+      if (!d) {
+        if (e.pointerType !== 'touch') {
+          canvas.style.cursor = inStrip(e)
+            ? (this._loopEdgeAt(e.offsetX) ? 'ew-resize' : 'pointer')
+            : '';
+        }
         return;
       }
-      canvas.style.cursor = inStrip(e)
-        ? (this._loopEdgeAt(e.offsetX) ? 'ew-resize' : 'pointer')
-        : '';
+      d.lastX = e.offsetX;
+      if (d.mode === 'pending' && Math.abs(e.offsetX - d.startX) > (d.touch ? 8 : 5)) {
+        clearTimeout(d.timer);
+        if (!this.playing) d.mode = d.touch ? 'pan' : 'paint';
+      }
+      if (d.mode === 'pan') {
+        this._tabScroll = d.startScroll - (e.offsetX - d.startX) / this._tabPps();
+        this._clampTabScroll();
+      } else if (d.mode === 'paint' || d.mode === 'resize') {
+        this._loopFromTimes(d.anchorT, this._tabTimeAt(e.offsetX), d.keepEnabled);
+      }
     });
+
     canvas.addEventListener('pointerup', (e) => {
+      if (e.pointerType === 'touch') {
+        this._tabPointers.delete(e.pointerId);
+        if (this._tabPointers.size < 2) this._pinch = null;
+      }
       const d = this._tabDrag;
-      this._tabDrag = null;
-      if (!d || d.dragging) return;
-      // Plain click: inside the loop region toggles it; elsewhere seeks to
-      // the start of the clicked measure.
+      if (!d) return;
+      clearDrag();
+      if (d.mode !== 'pending') return;
+      // Plain click/tap: inside the loop region toggles it; elsewhere seeks
+      // to the start of the clicked measure.
       const t = this._tabTimeAt(e.offsetX);
       if (this.loop && t >= this.loop.startTime && t < this.loop.endTime) {
         this.toggleLoop();
@@ -243,7 +315,11 @@ export class Player {
         this.seek(this.bars[idx].time);
       }
     });
-    canvas.addEventListener('pointercancel', () => { this._tabDrag = null; });
+    canvas.addEventListener('pointercancel', (e) => {
+      this._tabPointers.delete(e.pointerId);
+      if (this._tabPointers.size < 2) this._pinch = null;
+      clearDrag();
+    });
     canvas.addEventListener('wheel', (e) => {
       if (!inStrip(e)) return;
       e.preventDefault();
@@ -488,10 +564,10 @@ export class Player {
   }
 
   // 'start' | 'end' when x is within grabbing range of a loop edge.
-  _loopEdgeAt(x) {
+  _loopEdgeAt(x, range = 7) {
     if (!this.loop || this.playing) return null;
-    if (Math.abs(x - this._tabXOf(this.loop.startTime)) <= 7) return 'start';
-    if (Math.abs(x - this._tabXOf(this.loop.endTime)) <= 7) return 'end';
+    if (Math.abs(x - this._tabXOf(this.loop.startTime)) <= range) return 'start';
+    if (Math.abs(x - this._tabXOf(this.loop.endTime)) <= range) return 'end';
     return null;
   }
 
@@ -944,7 +1020,7 @@ export class Player {
 
     // Edge auto-scroll while dragging a loop selection past either side.
     const drag = this._tabDrag;
-    if (drag?.dragging && !this.playing) {
+    if ((drag?.mode === 'paint' || drag?.mode === 'resize') && !this.playing) {
       const margin = 44;
       let push = 0;
       if (drag.lastX < margin) push = drag.lastX - margin;
