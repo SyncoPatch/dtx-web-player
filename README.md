@@ -1,5 +1,10 @@
 # DTX Web Player
 
+**Live: <https://sileyin.github.io/dtx-web-player/>** — works on desktop and
+iPad (installable as a Home-Screen app). Deploys automatically on push to
+`main`; bump `VERSION` in `sw.js` when shell files change so installed PWAs
+pick up the update.
+
 A browser-based DTX chart player inspired by [DTXmaniaNX](https://github.com/limyz/DTXmaniaNX).
 Drum mode only, autoplay only — it parses `.dtx` charts, plays the keysounds/BGM
 with sample-accurate Web Audio scheduling, and renders a DTXMania-style falling-notes
@@ -106,8 +111,11 @@ Scroll and play speed are adjusted with −/+ steppers (hold to repeat).
 
 ## Limitations
 
-- Audio must be decodable by the browser: OGG / WAV / MP3 (and usually FLAC/M4A).
-  `.xa` and `.wma` keysounds are skipped with a warning.
+- Audio: OGG / WAV / MP3 (and usually FLAC/M4A). On Safari/iPad, OGG is
+  decoded by a vendored WASM decoder (`js/vendor/stbvorbis.js`). `.xa` and
+  `.wma` keysounds are skipped with a warning.
+- On iPad: tap the tab strip to seek, drag to browse, press-and-hold then
+  drag to paint a practice loop, pinch to zoom the notation.
 - No BGA / AVI / images, no MIDI, no judgement or scoring.
 - Password-protected ZIPs are not supported.
 - Needs a modern browser (uses `DecompressionStream`; Chrome 103+, Edge, Firefox 113+, Safari 16.4+).
