@@ -27,6 +27,8 @@ const el = {
 
 let player = null;
 let seeking = false;
+let currentDtx = null;   // parsed chart of the open song (for PDF export)
+let currentMeta = null;  // { title, artist, bpm, level, label }
 
 // ---- persisted playback settings ----
 
@@ -423,6 +425,15 @@ async function openChart(song, chartInfo) {
     if (lvl) sub.push(`Lv ${lvl}`);
     el.npSub.textContent = sub.join(' · ');
 
+    currentDtx = dtx;
+    currentMeta = {
+      title: dtx.title || song.title,
+      artist: dtx.artist,
+      bpm: dtx.bpm,
+      level: lvl,
+      label: chartInfo.label,
+    };
+
     const problems = missing.length + failed.length;
     if (problems) {
       el.npWarn.textContent = `⚠ ${problems} sound${problems > 1 ? 's' : ''} unavailable`;
@@ -506,6 +517,65 @@ $('btn-play').onclick = async () => {
     await player.play();
     el.btnPlay.textContent = 'Pause';
   }
+};
+
+// ---- PDF export ----
+
+// Rasterize a text line via canvas so non-WinAnsi titles (Japanese, …)
+// appear in the PDF without font embedding.
+function textToImage(text, sizePt, bold) {
+  const scale = 4;
+  const c = document.createElement('canvas');
+  let g = c.getContext('2d');
+  const font = `${bold ? '700' : '400'} ${sizePt * scale}px -apple-system, "Hiragino Kaku Gothic ProN", "Yu Gothic", Meiryo, sans-serif`;
+  g.font = font;
+  const w = Math.ceil(g.measureText(text).width) + 4;
+  const h = Math.ceil(sizePt * scale * 1.35);
+  c.width = w;
+  c.height = h;
+  g = c.getContext('2d');
+  g.fillStyle = '#fff';
+  g.fillRect(0, 0, w, h);
+  g.fillStyle = '#000';
+  g.font = font;
+  g.fillText(text, 2, Math.round(sizePt * scale * 1.02));
+  const src = g.getImageData(0, 0, w, h).data;
+  const rgb = new Uint8Array(w * h * 3);
+  for (let i = 0, j = 0; i < src.length; i += 4, j += 3) {
+    rgb[j] = src[i]; rgb[j + 1] = src[i + 1]; rgb[j + 2] = src[i + 2];
+  }
+  return { width: w, height: h, data: rgb, pxWidth: w / scale, pxHeight: h / scale };
+}
+
+$('btn-pdf').onclick = async () => {
+  if (!currentDtx) return;
+  try {
+    showOverlay('Generating PDF…');
+    const { buildScorePdf } = await import('./score.js');
+    const bytes = await buildScorePdf({
+      title: currentMeta.title,
+      artist: currentMeta.artist,
+      bpm: currentMeta.bpm,
+      level: currentMeta.level,
+      chips: currentDtx.chips,
+      bars: currentDtx.bars,
+      beats: currentDtx.beats,
+    }, { textToImage });
+    const name = `${currentMeta.title}${currentMeta.label ? ` (${currentMeta.label})` : ''}`
+      .replace(/[\\/:*?"<>|]+/g, '_').slice(0, 120) || 'score';
+    const url = URL.createObjectURL(new Blob([bytes], { type: 'application/pdf' }));
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${name}.pdf`;
+    document.body.append(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 30000);
+  } catch (err) {
+    console.error(err);
+    alert(`Failed to generate PDF:\n${err.message}`);
+  }
+  hideOverlay();
 };
 
 // ---- tab strip & practice loop ----

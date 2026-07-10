@@ -80,6 +80,14 @@ Scroll and play speed are adjusted with −/+ steppers (hold to repeat).
   temporarily disable the loop — it turns grey and playback passes through —
   and click again to re-enable. Clear it with the ✕ on the badge. Playback
   cycles the looped measures, restarting mid-BGM correctly.
+- **PDF export** — the "PDF" button engraves the open chart as printable
+  black-on-white drum sheet music (A4 portrait, multi-page, self-contained —
+  the PDF is generated in the browser with no libraries). Print-grade
+  auto-formatting: flams become grace notes, triplets/quintuplets/etc. get
+  tuplet numbers on their beams, basic rests (whole-measure, empty-beat, and
+  leading 8th/16th rests), density-aware measure packing, percussion clef and
+  time signatures, and notes padded off the barlines. Japanese titles are
+  rasterized so they print correctly.
 - **Lane display** (in the Settings panel):
   - *Lane order*: rearrange the 10 lanes arbitrarily with ▲/▼.
   - *Grouping*: DTXMania-style merge checkboxes — LC→HH (HH group),

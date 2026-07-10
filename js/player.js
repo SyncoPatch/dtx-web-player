@@ -77,7 +77,8 @@ const HH_GROUP = new Set([0x11, 0x18, 0x1B]);
 // ---- drum tab (sheet notation) ----
 // Staff positions in half-steps from the top staff line (even = on a line).
 // Hands are stemmed/beamed upward, feet downward, like standard kit notation.
-const TAB_HANDS = new Map([
+// (Exported for the PDF score engine in score.js.)
+export const TAB_HANDS = new Map([
   [0x1A, -4], // LC: high ledger
   [0x16, -2], // CY: ledger above staff
   [0x11, -1], [0x18, -1], // HH closed/open: above top line
@@ -87,11 +88,11 @@ const TAB_HANDS = new Map([
   [0x12, 3],  // SD
   [0x17, 5],  // FT
 ]);
-const TAB_FEET = new Map([
+export const TAB_FEET = new Map([
   [0x13, 7], [0x1C, 7], // BD / LBD: bottom space
   [0x1B, 9],            // LP: below the staff
 ]);
-const TAB_XHEAD = new Set([0x1A, 0x16, 0x11, 0x18, 0x19, 0x1B]); // cymbals & pedal
+export const TAB_XHEAD = new Set([0x1A, 0x16, 0x11, 0x18, 0x19, 0x1B]); // cymbals & pedal
 const TAB_PPS = 150;     // horizontal px/second at scroll speed 1.0
 const TAB_GAP = 12;      // staff line spacing
 const TAB_STRIP_H = 170; // height of the tab strip above/below the lanes
