@@ -181,9 +181,10 @@ export class Player {
     this.ctxStart = 0;
     this.speed = 1.0;      // scroll speed (visual only)
     this.playSpeed = 1.0;  // playback tempo (audio + clock)
-    this.offset = 0;       // display-audio offset in seconds (visual only):
-                           // positive shifts notes later to compensate for
-                           // audio output latency
+    this.globalOffset = 0; // display-audio offset in real seconds (visual
+                           // only): positive shifts notes later to compensate
+                           // for audio output latency
+    this.chartOffset = 0;  // per-chart correction in song seconds
     this.tabPos = 'off';   // tab strip position: 'off' | 'top' | 'bottom'
     this.tabZoom = 1;      // tab horizontal zoom (0.25..4)
     this._tabScroll = 0;   // paused-view scroll offset in song seconds
@@ -540,10 +541,18 @@ export class Player {
     this.display = { ...defaultDisplay(), ...display };
   }
 
-  // Display-audio offset in seconds; only the renderer's clock shifts, audio
-  // scheduling is untouched.
-  setOffset(seconds) {
-    this.offset = seconds;
+  // Display-audio offsets in seconds; only the renderer's clock shifts, audio
+  // scheduling is untouched. globalSec is real time, chartSec is song time.
+  setOffset(globalSec, chartSec = 0) {
+    this.globalOffset = globalSec;
+    this.chartOffset = chartSec;
+  }
+
+  // Effective display offset in song seconds. Global offset compensates
+  // real-time audio latency, so it scales with playSpeed; chart offset
+  // corrects chart-vs-recording misalignment, which lives in song time.
+  get offset() {
+    return this.globalOffset * this.playSpeed + this.chartOffset;
   }
 
   setTabPos(pos) {

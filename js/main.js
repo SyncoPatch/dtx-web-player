@@ -70,14 +70,14 @@ function chartOffset() {
 }
 
 function applyOffset() {
-  player?.setOffset((settings.offsetMs + chartOffset()) / 1000);
+  player?.setOffset(settings.offsetMs / 1000, chartOffset() / 1000);
 }
 
 function applySettings(p) {
   p.speed = settings.scroll;
   p.setTabPos(settings.tabPos);
   p.setTabZoom(settings.tabZoom);
-  p.setOffset((settings.offsetMs + chartOffset()) / 1000);
+  p.setOffset(settings.offsetMs / 1000, chartOffset() / 1000);
   p.setPlaySpeed(settings.playSpeed);
   p.setVolume(settings.volMaster);
   p.setBgmVolume(settings.volBgm);
@@ -1162,10 +1162,10 @@ function buildPlaybackSection() {
   row('Scroll speed', makeStepper('scroll').el);
   row('Play speed', makeStepper('playSpeed').el);
   const g = makeStepper('offsetGlobal');
-  g.el.title = 'Display-audio offset: positive shifts notes later, to compensate for audio output latency';
+  g.el.title = 'Display-audio offset: positive shifts notes later, to compensate for audio output latency (real-time ms, independent of play speed)';
   row('Display offset', g.el);
   const c = makeStepper('offsetChart');
-  c.el.title = 'Extra offset for the currently open chart, added on top of the global display offset';
+  c.el.title = 'Extra offset for the currently open chart, added on top of the global display offset (song-time ms, scales with play speed)';
   row('Chart offset', c.el);
   for (const [key, text] of [['volNotes', 'Notes volume'], ['volBgm', 'BGM volume'], ['volMaster', 'Master volume']]) {
     const input = document.createElement('input');
