@@ -70,14 +70,14 @@ function chartOffset() {
 }
 
 function applyOffset() {
-  player?.setOffset((settings.offsetMs + chartOffset()) / 1000);
+  player?.setOffset(settings.offsetMs / 1000, chartOffset() / 1000);
 }
 
 function applySettings(p) {
   p.speed = settings.scroll;
   p.setTabPos(settings.tabPos);
   p.setTabZoom(settings.tabZoom);
-  p.setOffset((settings.offsetMs + chartOffset()) / 1000);
+  p.setOffset(settings.offsetMs / 1000, chartOffset() / 1000);
   p.setPlaySpeed(settings.playSpeed);
   p.setVolume(settings.volMaster);
   p.setBgmVolume(settings.volBgm);
@@ -399,9 +399,18 @@ function showCardMenu(btn, song) {
   menu.className = 'card-menu';
   menu.dataset.songId = song.id;
   for (const d of song.dtxs) {
+    const name = d.label || d.title || basename(d.path);
+    const view = document.createElement('button');
+    view.className = 'card-menu-item';
+    view.textContent = `Chart image — ${name}`;
+    view.onclick = () => {
+      closeCardMenu();
+      openChartViewerFromLibrary(song, d);
+    };
+    menu.append(view);
     const item = document.createElement('button');
     item.className = 'card-menu-item';
-    item.textContent = `Export PDF — ${d.label || d.title || basename(d.path)}`;
+    item.textContent = `Export PDF — ${name}`;
     item.onclick = () => {
       closeCardMenu();
       exportChartPdfFromLibrary(song, d);
@@ -647,6 +656,98 @@ async function exportChartPdfFromLibrary(song, chartInfo) {
     alert(`Failed to export PDF:\n${err.message}`);
   }
 }
+
+// ---- static chart viewer ----
+
+let viewerDtx = null;
+let viewerMeta = null;
+
+function chartViewerOpts() {
+  return {
+    colors: settings.colors,
+    laneOrder: settings.laneOrder,
+    groups: settings.groups,
+    hiddenLanes: settings.hiddenLanes,
+    background: '#000',
+  };
+}
+
+async function openChartViewer(dtx, meta) {
+  if (!dtx.bars.length || !dtx.chips.length) {
+    alert('This chart has no notes to display.');
+    return;
+  }
+  try {
+    showOverlay('Rendering chart…');
+    const { renderChartView } = await import('./chartview.js');
+    viewerDtx = dtx;
+    viewerMeta = meta;
+    const bits = [meta.title || 'Chart'];
+    if (meta.label) bits.push(meta.label);
+    if (meta.bpm) bits.push(`BPM ${meta.bpm}`);
+    $('chart-view-title').textContent = bits.join(' · ');
+    renderChartView($('chart-view'), dtx, chartViewerOpts());
+    $('chart-view-panel').hidden = false;
+    $('chart-view-wrap').scrollTop = $('chart-view').clientHeight; // start at chart bottom
+  } catch (err) {
+    console.error(err);
+    alert(`Failed to render chart:\n${err.message}`);
+  }
+  hideOverlay();
+}
+
+async function openChartViewerFromLibrary(song, chartInfo) {
+  try {
+    showOverlay('Loading chart…');
+    const stored = await getSongFiles(song.id);
+    const fileMap = new Map(stored.map((f) => [f.path, f.blob]));
+    const blob = fileMap.get(chartInfo.path);
+    if (!blob) throw new Error('Chart file missing from local storage.');
+    const dtx = parseDTX(decodeText(await blob.arrayBuffer()));
+    await openChartViewer(dtx, {
+      title: dtx.title || song.title,
+      artist: dtx.artist,
+      bpm: dtx.bpm,
+      level: fmtLevel(dtx.level),
+      label: chartInfo.label,
+    });
+  } catch (err) {
+    console.error(err);
+    hideOverlay();
+    alert(`Failed to open chart:\n${err.message}`);
+  }
+}
+
+$('btn-image')?.addEventListener('click', () => {
+  if (currentDtx) openChartViewer(currentDtx, currentMeta);
+});
+
+$('chart-view-close').onclick = () => {
+  $('chart-view-panel').hidden = true;
+};
+
+$('chart-view-download').onclick = async () => {
+  if (!viewerDtx) return;
+  try {
+    showOverlay('Saving image…');
+    const { exportChartPng } = await import('./chartview.js');
+    const blob = await exportChartPng(viewerDtx, chartViewerOpts());
+    const name = `${viewerMeta.title || 'chart'}${viewerMeta.label ? ` (${viewerMeta.label})` : ''}`
+      .replace(/[\\/:*?"<>|]+/g, '_').slice(0, 120) || 'chart';
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${name}.png`;
+    document.body.append(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 30000);
+  } catch (err) {
+    console.error(err);
+    alert(`Failed to save image:\n${err.message}`);
+  }
+  hideOverlay();
+};
 
 // ---- tab strip & practice loop ----
 
@@ -1061,10 +1162,10 @@ function buildPlaybackSection() {
   row('Scroll speed', makeStepper('scroll').el);
   row('Play speed', makeStepper('playSpeed').el);
   const g = makeStepper('offsetGlobal');
-  g.el.title = 'Display-audio offset: positive shifts notes later, to compensate for audio output latency';
+  g.el.title = 'Display-audio offset: positive shifts notes later, to compensate for audio output latency (real-time ms, independent of play speed)';
   row('Display offset', g.el);
   const c = makeStepper('offsetChart');
-  c.el.title = 'Extra offset for the currently open chart, added on top of the global display offset';
+  c.el.title = 'Extra offset for the currently open chart, added on top of the global display offset (song-time ms, scales with play speed)';
   row('Chart offset', c.el);
   for (const [key, text] of [['volNotes', 'Notes volume'], ['volBgm', 'BGM volume'], ['volMaster', 'Master volume']]) {
     const input = document.createElement('input');

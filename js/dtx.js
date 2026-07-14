@@ -42,8 +42,9 @@ export function parseDTX(text, { headersOnly = false } = {}) {
     bpm: 120, level: null, preview: null, preimage: null,
     wavs: new Map(),    // wavId -> { file, volume (0-100), pan (-100..100) }
     chips: [],          // { time, ch, wav, visible } sorted by time
-    bars: [],           // { time, num } measure starts
+    bars: [],           // { time, num, beats } measure starts (beats = length in quarter notes)
     beats: [],          // { time } beat lines (excluding measure starts)
+    bpmChanges: [],     // { time, bpm } tempo changes (excluding the initial #BPM)
     chartEnd: 0,        // time of the last chip (excluding audio tails)
   };
 
@@ -166,8 +167,9 @@ export function parseDTX(text, { headersOnly = false } = {}) {
     lastBeat = e.beat;
     if (e.kind === 0) {
       bpm = e.bpm;
+      dtx.bpmChanges.push({ time, bpm });
     } else if (e.kind === 1) {
-      dtx.bars.push({ time, num: e.num });
+      dtx.bars.push({ time, num: e.num, beats: barBeats[e.num] });
     } else if (e.kind === 2) {
       dtx.beats.push({ time });
     } else {

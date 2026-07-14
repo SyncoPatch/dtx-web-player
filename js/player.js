@@ -25,7 +25,7 @@ export const NOTE_TYPES = [
   { key: 'RD',  label: 'Ride',            ch: 0x19, color: '#6fe0e8' },
 ];
 
-const CH_TYPE = new Map(NOTE_TYPES.map((t) => [t.ch, t.key]));
+export const CH_TYPE = new Map(NOTE_TYPES.map((t) => [t.ch, t.key]));
 
 export function defaultColors() {
   return Object.fromEntries(NOTE_TYPES.map((t) => [t.key, t.color]));
@@ -50,7 +50,7 @@ export function defaultDisplay() {
 // DTXManiaNX default drum lane order (left to right).
 export const LANE_IDS = ['LC', 'HH', 'LP', 'SD', 'HT', 'BD', 'LT', 'FT', 'CY', 'RD'];
 
-const LANE_DEF = {
+export const LANE_DEF = {
   LC: { channels: [0x1A], w: 1.0 },
   HH: { channels: [0x11, 0x18], w: 1.0 },
   LP: { channels: [0x1B, 0x1C], w: 1.0 },
@@ -73,6 +73,28 @@ export const GROUP_RULES = {
 
 // Open/close hi-hat and left pedal choke each other.
 const HH_GROUP = new Set([0x11, 0x18, 0x1B]);
+
+// Resolve the visible lanes and channel->lane-index map for a given lane order,
+// grouping, and hidden-lane set. Pure (no `this`) so the static chart viewer
+// (chartview.js) and the live highway (_rebuildLanes) share identical lane
+// resolution. Returns { lanes: [{id, channels, w}], chToLane: Map<ch, idx> }.
+export function buildLanes({ laneOrder = LANE_IDS, groups = {}, hiddenLanes = new Set() } = {}) {
+  const grouped = new Set();
+  for (const [laneId, [key]] of Object.entries(GROUP_RULES)) {
+    if (groups[key]) grouped.add(laneId);
+  }
+  const hidden = new Set([...hiddenLanes, ...grouped]);
+  const lanes = laneOrder
+    .filter((id) => !hidden.has(id))
+    .map((id) => ({ id, ...LANE_DEF[id] }));
+  const idx = new Map(lanes.map((l, i) => [l.id, i]));
+  const chToLane = new Map();
+  for (const id of LANE_IDS) {
+    const target = grouped.has(id) ? GROUP_RULES[id][1] : id;
+    for (const ch of LANE_DEF[id].channels) chToLane.set(ch, idx.get(target));
+  }
+  return { lanes, chToLane };
+}
 
 // ---- drum tab (sheet notation) ----
 // Staff positions in half-steps from the top staff line (even = on a line).
@@ -159,9 +181,10 @@ export class Player {
     this.ctxStart = 0;
     this.speed = 1.0;      // scroll speed (visual only)
     this.playSpeed = 1.0;  // playback tempo (audio + clock)
-    this.offset = 0;       // display-audio offset in seconds (visual only):
-                           // positive shifts notes later to compensate for
-                           // audio output latency
+    this.globalOffset = 0; // display-audio offset in real seconds (visual
+                           // only): positive shifts notes later to compensate
+                           // for audio output latency
+    this.chartOffset = 0;  // per-chart correction in song seconds
     this.tabPos = 'off';   // tab strip position: 'off' | 'top' | 'bottom'
     this.tabZoom = 1;      // tab horizontal zoom (0.25..4)
     this._tabScroll = 0;   // paused-view scroll offset in song seconds
@@ -518,10 +541,18 @@ export class Player {
     this.display = { ...defaultDisplay(), ...display };
   }
 
-  // Display-audio offset in seconds; only the renderer's clock shifts, audio
-  // scheduling is untouched.
-  setOffset(seconds) {
-    this.offset = seconds;
+  // Display-audio offsets in seconds; only the renderer's clock shifts, audio
+  // scheduling is untouched. globalSec is real time, chartSec is song time.
+  setOffset(globalSec, chartSec = 0) {
+    this.globalOffset = globalSec;
+    this.chartOffset = chartSec;
+  }
+
+  // Effective display offset in song seconds. Global offset compensates
+  // real-time audio latency, so it scales with playSpeed; chart offset
+  // corrects chart-vs-recording misalignment, which lives in song time.
+  get offset() {
+    return this.globalOffset * this.playSpeed + this.chartOffset;
   }
 
   setTabPos(pos) {
@@ -639,22 +670,14 @@ export class Player {
 
   _rebuildLanes() {
     // Lanes folded into another lane by grouping redirect their chips there;
-    // user-hidden lanes simply drop theirs.
-    const grouped = new Set();
-    for (const [laneId, [key]] of Object.entries(GROUP_RULES)) {
-      if (this.groups[key]) grouped.add(laneId);
-    }
-    const hidden = new Set([...this.hiddenLanes, ...grouped]);
-    this.lanes = this.laneOrder
-      .filter((id) => !hidden.has(id))
-      .map((id) => ({ id, ...LANE_DEF[id] }));
-    const idx = new Map(this.lanes.map((l, i) => [l.id, i]));
-
-    this.chToLane = new Map();
-    for (const id of LANE_IDS) {
-      const target = grouped.has(id) ? GROUP_RULES[id][1] : id;
-      for (const ch of LANE_DEF[id].channels) this.chToLane.set(ch, idx.get(target));
-    }
+    // user-hidden lanes simply drop theirs. Shared with the static chart viewer.
+    const { lanes, chToLane } = buildLanes({
+      laneOrder: this.laneOrder,
+      groups: this.groups,
+      hiddenLanes: this.hiddenLanes,
+    });
+    this.lanes = lanes;
+    this.chToLane = chToLane;
 
     this.notes = [];
     for (const c of this.chips) {
