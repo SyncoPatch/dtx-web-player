@@ -71,6 +71,7 @@
       <label class="slider-label">Master
         <input type="range" id="vol" min="0" max="1" step="0.01" value="0.9">
       </label>
+      <button id="btn-image" class="btn small" title="View the whole chart as a static image">Chart</button>
       <button id="btn-pdf" class="btn small" title="Export this chart as printable sheet music (PDF)">PDF</button>
       <button id="btn-lanes" class="btn small">Settings&hellip;</button>
     </div>
@@ -105,6 +106,19 @@
     <div class="panel-foot">
       <button id="lane-reset" class="btn small">Reset to defaults</button>
     </div>
+  </div>
+</div>
+
+<div id="chart-view-panel" hidden>
+  <div class="chart-view-head">
+    <span id="chart-view-title">Chart</span>
+    <span class="chart-view-actions">
+      <button id="chart-view-download" class="btn small" title="Download this chart as a PNG image">Download PNG</button>
+      <button id="chart-view-close" class="btn small" title="Close">&times;</button>
+    </span>
+  </div>
+  <div id="chart-view-wrap">
+    <canvas id="chart-view"></canvas>
   </div>
 </div>
 

@@ -281,6 +281,32 @@ input[type="range"] { accent-color: var(--accent); }
 
 /* ---- overlay ---- */
 
+#chart-view-panel {
+  position: fixed; inset: 0;
+  background: #000;
+  display: flex; flex-direction: column;
+  z-index: 95;
+}
+.chart-view-head {
+  display: flex; align-items: center; gap: 12px;
+  padding: 10px 14px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+  flex: 0 0 auto;
+}
+#chart-view-title {
+  flex: 1; font-size: 14px; color: var(--text);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.chart-view-actions { display: flex; gap: 8px; }
+#chart-view-wrap {
+  flex: 1; min-height: 0;
+  overflow: auto;
+  -webkit-overflow-scrolling: touch;
+  background: #000;
+}
+#chart-view { display: block; }
+
 #overlay {
   position: fixed; inset: 0;
   background: rgba(8, 8, 14, 0.75);
