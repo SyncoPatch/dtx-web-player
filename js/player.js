@@ -147,23 +147,29 @@ export class Player {
 
     const AC = window.AudioContext || window.webkitAudioContext;
     this.ctx = new AC();
-    // iOS unlocks audio only inside a user gesture. The Player is created in
-    // a click/tap handler, so resume immediately and play one silent frame.
-    this.ctx.resume().catch(() => {});
-    try {
-      const unlock = this.ctx.createBufferSource();
-      unlock.buffer = this.ctx.createBuffer(1, 1, this.ctx.sampleRate);
-      unlock.connect(this.ctx.destination);
-      unlock.start(0);
-    } catch { /* not fatal */ }
-    this.master = this.ctx.createGain();
-    this.master.gain.value = 0.9;
-    this.master.connect(this.ctx.destination);
-    // Separate buses: drum-note keysounds vs BGM/auto-played sounds.
-    this.noteGain = this.ctx.createGain();
-    this.noteGain.connect(this.master);
-    this.autoGain = this.ctx.createGain();
-    this.autoGain.connect(this.master);
+    // iOS drives the context into suspended/interrupted whenever the tab is
+    // backgrounded (switch tabs to download a file, phone call, control centre,
+    // …). A plain resume() often can't clear that: the context comes back either
+    // silent or with seconds of output latency. When we detect degradation we
+    // rebuild the context outright (see _ensureRunning / _recreateContext).
+    this._audioDegraded = false;
+    this._unlockAudio();
+    this._buildGraph();
+    this._attachStateListener();
+    this._onVisible = () => {
+      if (document.hidden) {
+        // Being backgrounded — the context will be interrupted. Freeze the
+        // clock now (while it still reads correctly) and mark for recovery.
+        this._audioDegraded = true;
+        if (this.playing) this.pause();
+        return;
+      }
+      // Back in the foreground: opportunistically resume for the easy cases
+      // (desktop, brief switches). _audioDegraded stays set so the next play()
+      // still recreates the context if resume didn't produce a healthy one.
+      this.ctx.resume().catch(() => {});
+    };
+    document.addEventListener('visibilitychange', this._onVisible);
     this.bank = new SoundBank(this.ctx);
     this.stretcher = new Stretcher();
     this._stretched = new Map(); // wavId -> stretched AudioBuffer (playSpeed != 1)
@@ -379,6 +385,75 @@ export class Player {
     return this.startOffset + Math.max(0, this.ctx.currentTime - this.ctxStart) * this.playSpeed;
   }
 
+  // iOS unlocks audio only inside a user gesture. The Player is created (and the
+  // context recreated) inside a click/tap handler, so resume immediately and
+  // play one silent frame.
+  _unlockAudio() {
+    this.ctx.resume().catch(() => {});
+    try {
+      const unlock = this.ctx.createBufferSource();
+      unlock.buffer = this.ctx.createBuffer(1, 1, this.ctx.sampleRate);
+      unlock.connect(this.ctx.destination);
+      unlock.start(0);
+    } catch { /* not fatal */ }
+  }
+
+  // master gain -> destination, with separate buses for drum-note keysounds and
+  // BGM/auto-played sounds. Rebuilt from scratch after a context recreation.
+  _buildGraph() {
+    this.master = this.ctx.createGain();
+    this.master.gain.value = 0.9;
+    this.master.connect(this.ctx.destination);
+    this.noteGain = this.ctx.createGain();
+    this.noteGain.connect(this.master);
+    this.autoGain = this.ctx.createGain();
+    this.autoGain.connect(this.master);
+  }
+
+  // Safari flips to the 'interrupted' state on backgrounding without always
+  // firing visibilitychange (control centre, another tab grabbing audio, …).
+  _attachStateListener() {
+    this.ctx.addEventListener('statechange', () => {
+      if (this.ctx.state === 'interrupted') this._audioDegraded = true;
+    });
+  }
+
+  // Tear down the wedged context and build a fresh one. Decoded AudioBuffers are
+  // context-independent, so bank sounds and stretched buffers are reused as-is;
+  // only the tiny gain graph is rebuilt. Runs inside a user gesture (play()).
+  async _recreateContext() {
+    const vol = {
+      master: this.master.gain.value,
+      note: this.noteGain.gain.value,
+      auto: this.autoGain.gain.value,
+    };
+    // Sources belong to the dying context; drop the stale bookkeeping.
+    this._sources.clear();
+    this._activeByWav.clear();
+    this._activeHH.clear();
+
+    try { this.ctx.close(); } catch { /* already closed */ }
+    const AC = window.AudioContext || window.webkitAudioContext;
+    this.ctx = new AC();
+    this._unlockAudio();
+    this._buildGraph();
+    this.master.gain.value = vol.master;
+    this.noteGain.gain.value = vol.note;
+    this.autoGain.gain.value = vol.auto;
+    this.bank.ctx = this.ctx;
+    this._attachStateListener();
+    this._audioDegraded = false;
+    try { await this.ctx.resume(); } catch { /* resumed by the gesture anyway */ }
+  }
+
+  // Get a healthy, running context before scheduling. Recreate if it was
+  // interrupted/backgrounded, or if a plain resume can't reach 'running'.
+  async _ensureRunning() {
+    if (this._audioDegraded) { await this._recreateContext(); return; }
+    try { await this.ctx.resume(); } catch { /* fall through to recreate */ }
+    if (this.ctx.state !== 'running') await this._recreateContext();
+  }
+
   async load(dtx, resolveFile, onProgress) {
     this.pause();
     this.stopAudio();
@@ -399,7 +474,7 @@ export class Player {
 
   async play() {
     if (this.playing || !this.chips.length) return;
-    await this.ctx.resume();
+    await this._ensureRunning();
     if (this.pausedAt >= this.duration - 0.05) this.pausedAt = 0;
 
     this.startOffset = this.pausedAt;
@@ -674,6 +749,7 @@ export class Player {
     this.pause();
     cancelAnimationFrame(this._raf);
     this._ro.disconnect();
+    document.removeEventListener('visibilitychange', this._onVisible);
     this.ctx.close();
   }
 
