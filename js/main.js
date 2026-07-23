@@ -2,8 +2,9 @@
 
 import { extractZip } from './zip.js';
 import { parseDTX, parseSetDef, decodeText } from './dtx.js';
-import { listSongs, addSong, deleteSong, getSongFiles } from './db.js';
+import { listSongs, addSong, deleteSong, getSongFiles, listSkins, addSkin, deleteSkin } from './db.js';
 import { Player, NOTE_TYPES, LANE_IDS, GROUP_RULES, defaultColors, defaultDisplay } from './player.js';
+import { Skin, collectSkinFiles } from './skin.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -41,6 +42,7 @@ const settings = {
   colors: defaultColors(),
   display: defaultDisplay(),
   hiddenLanes: [],
+  skinId: null,
 };
 try {
   const saved = JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{}');
@@ -87,6 +89,37 @@ function applySettings(p) {
   p.setGroups(settings.groups);       // rebuilds lanes,
   p.setHiddenLanes(settings.hiddenLanes);
   p.setLaneOrder(settings.laneOrder); // so order last
+  p.setSkin(currentSkin);
+}
+
+// ---- DTXMania skins ----
+
+let currentSkin = null;   // loaded Skin instance, or null = procedural
+let loadedSkinId = null;  // skin id currentSkin was decoded from
+let skinGen = 0;          // discards stale loads on rapid switching
+
+// Loads settings.skinId into ImageBitmaps (lazily, cached) and hands it to
+// the player. Safe to call fire-and-forget.
+async function applySkin() {
+  const id = settings.skinId || null;
+  if (id === loadedSkinId) {
+    player?.setSkin(currentSkin);
+    return;
+  }
+  const gen = ++skinGen;
+  let next = null;
+  if (id) {
+    try {
+      next = await Skin.load(id);
+    } catch (err) {
+      console.warn('Failed to load skin', err);
+    }
+  }
+  if (gen !== skinGen) { next?.dispose(); return; } // superseded
+  currentSkin?.dispose();
+  currentSkin = next;
+  loadedSkinId = next ? id : null;
+  player?.setSkin(currentSkin);
 }
 
 // ---- helpers ----
@@ -459,6 +492,7 @@ async function openChart(song, chartInfo) {
       };
       applySettings(player);
     }
+    applySkin(); // async; decodes the selected skin on first player use
 
     currentChartKey = `${song.id}::${chartInfo.path}`;
     applyOffset();
@@ -1150,6 +1184,93 @@ function buildDisplayOpts() {
   wrap.append(opLabel);
 }
 
+// DTXMania skin selector: imported skins reskin the play screen (notes, lane
+// panels, hit bar, background, hit effects); "None" keeps procedural drawing.
+async function buildSkinSection() {
+  const wrap = $('skin-opts');
+  wrap.replaceChildren();
+
+  const skins = await listSkins();
+
+  const selLabel = document.createElement('label');
+  selLabel.className = 'display-row';
+  const sel = document.createElement('select');
+  const none = document.createElement('option');
+  none.value = '';
+  none.textContent = 'None (default flat style)';
+  sel.append(none);
+  for (const s of skins) {
+    const opt = document.createElement('option');
+    opt.value = s.id;
+    opt.textContent = s.name;
+    sel.append(opt);
+  }
+  sel.value = skins.some((s) => s.id === settings.skinId) ? settings.skinId : '';
+  sel.onchange = () => {
+    settings.skinId = sel.value || null;
+    saveSettings();
+    applySkin();
+    del.disabled = !sel.value;
+  };
+  selLabel.append('Skin', sel);
+  wrap.append(selLabel);
+
+  const btns = document.createElement('div');
+  btns.className = 'display-row';
+  const imp = document.createElement('button');
+  imp.className = 'btn small';
+  imp.textContent = 'Import skin ZIP…';
+  imp.title = 'A DTXMania skin: a ZIP containing a Graphics folder (7_chips_drums.png etc.)';
+  imp.onclick = () => $('file-skin').click();
+  const del = document.createElement('button');
+  del.className = 'btn small';
+  del.textContent = 'Delete';
+  del.disabled = !sel.value;
+  del.onclick = async () => {
+    const id = sel.value;
+    if (!id || !confirm('Delete this skin?')) return;
+    await deleteSkin(id);
+    if (settings.skinId === id) {
+      settings.skinId = null;
+      saveSettings();
+      applySkin();
+    }
+    buildSkinSection();
+  };
+  btns.append(imp, del);
+  wrap.append(btns);
+}
+
+async function importSkinZip(file) {
+  try {
+    showOverlay(`Extracting ${file.name}…`);
+    const entries = await extractZip(await file.arrayBuffer());
+    const files = collectSkinFiles(entries);
+    const skin = {
+      id: crypto.randomUUID(),
+      name: file.name.replace(/\.zip$/i, ''),
+      addedAt: Date.now(),
+      size: files.reduce((a, f) => a + f.blob.size, 0),
+      fileCount: files.length,
+    };
+    await addSkin(skin, files);
+    settings.skinId = skin.id;
+    saveSettings();
+    applySkin();
+    await buildSkinSection();
+  } catch (err) {
+    console.error(err);
+    alert(`Failed to import skin:\n${err.message}`);
+  }
+  hideOverlay();
+}
+
+const fileSkin = $('file-skin');
+fileSkin.onchange = () => {
+  if (fileSkin.files[0]) importSkinZip(fileSkin.files[0]);
+  fileSkin.value = '';
+};
+
 function buildPlaybackSection() {
   const wrap = $('playback-opts');
   wrap.replaceChildren();
@@ -1185,6 +1306,7 @@ function openSettingsPanel() {
   buildLaneOrderList();
   buildNoteColorList();
   buildDisplayOpts();
+  buildSkinSection();
   lanePanel.hidden = false;
 }
 

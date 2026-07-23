@@ -206,6 +206,8 @@ export class Player {
     this._schedTimer = null;
     this._visIdx = 0;
     this._laneFlash = [];
+    this.skin = null;   // DTXMania skin (skin.js Skin), or null = procedural
+    this._fx = [];      // active skin hit explosions: { lane, key, time }
     this._sources = new Set();
     this._activeByWav = new Map();
     this._activeHH = new Map();
@@ -541,6 +543,13 @@ export class Player {
     this.display = { ...defaultDisplay(), ...display };
   }
 
+  // DTXMania skin (skin.js Skin) or null for procedural drawing; read live
+  // by the renderer, which falls back per element when an image is missing.
+  setSkin(skin) {
+    this.skin = skin || null;
+    this._fx.length = 0;
+  }
+
   // Display-audio offsets in seconds; only the renderer's clock shifts, audio
   // scheduling is untouched. globalSec is real time, chartSec is song time.
   setOffset(globalSec, chartSec = 0) {
@@ -752,6 +761,7 @@ export class Player {
     // The flash pointer tracks the (offset-shifted) display clock.
     this._visIdx = lowerBound(this.notes, t - this.offset);
     this._laneFlash.fill(-Infinity);
+    this._fx.length = 0;
   }
 
   _tick() {
@@ -845,6 +855,12 @@ export class Player {
 
     g.fillStyle = '#101018';
     g.fillRect(0, 0, W, H);
+    const bg = this.skin?.bg;
+    if (bg) {
+      // Cover-fit the skin's play background over the canvas.
+      const s = Math.max(W / bg.width, H / bg.height);
+      g.drawImage(bg, (W - bg.width * s) / 2, (H - bg.height * s) / 2, bg.width * s, bg.height * s);
+    }
 
     // Optional tab strip at the top or bottom; the lanes take the rest.
     const region = this._tabRegion();
@@ -902,23 +918,40 @@ export class Player {
       x += lane.w * unit;
     }
 
-    // Lane backgrounds and separators (hidden in dark half/full).
+    // Lane backgrounds and separators (hidden in dark half/full). With a
+    // skin, each lane draws its 7_Paret.png column instead; the lane opacity
+    // slider ("Lane Trans") drives the panel alpha in both modes.
+    const skin = this.skin;
     if (dark === 'off' && lanes.length) {
-      const bgAlpha = (Math.max(0, Math.min(100, disp.laneOpacity)) / 100) * 0.12;
-      g.fillStyle = `rgba(255,255,255,${bgAlpha.toFixed(4)})`;
+      const opacity = Math.max(0, Math.min(100, disp.laneOpacity)) / 100;
+      const bgAlpha = opacity * 0.12;
+      let procedural = false;
       for (let i = 0; i < lanes.length; i++) {
-        g.fillRect(laneX[i] + 1, y0, lanes[i].w * unit - 2, RH);
+        const p = skin?.paret(lanes[i].id);
+        if (p) {
+          g.globalAlpha = opacity;
+          g.drawImage(p.bmp, p.sx, 0, p.sw, p.bmp.height, laneX[i], y0, lanes[i].w * unit, RH);
+          g.globalAlpha = 1;
+        } else {
+          procedural = true;
+          g.fillStyle = `rgba(255,255,255,${bgAlpha.toFixed(4)})`;
+          g.fillRect(laneX[i] + 1, y0, lanes[i].w * unit - 2, RH);
+        }
       }
-      g.strokeStyle = 'rgba(255,255,255,0.10)';
-      g.lineWidth = 1;
-      g.beginPath();
-      x = x0;
-      for (let i = 0; i <= lanes.length; i++) {
-        g.moveTo(Math.round(x) + 0.5, y0);
-        g.lineTo(Math.round(x) + 0.5, y1);
-        if (i < lanes.length) x += lanes[i].w * unit;
+      // Skin panel art carries its own lane edges; only the procedural
+      // fills need separator lines.
+      if (procedural) {
+        g.strokeStyle = 'rgba(255,255,255,0.10)';
+        g.lineWidth = 1;
+        g.beginPath();
+        x = x0;
+        for (let i = 0; i <= lanes.length; i++) {
+          g.moveTo(Math.round(x) + 0.5, y0);
+          g.lineTo(Math.round(x) + 0.5, y1);
+          if (i < lanes.length) x += lanes[i].w * unit;
+        }
+        g.stroke();
       }
-      g.stroke();
     }
 
     const tMin = now - 40 / pps;
@@ -959,39 +992,58 @@ export class Player {
         }
       }
       if (disp.hitLine) {
-        const grad = g.createLinearGradient(0, hitY - 3, 0, hitY + 3);
-        grad.addColorStop(0, 'rgba(255,80,80,0.15)');
-        grad.addColorStop(0.5, '#ff4d4d');
-        grad.addColorStop(1, 'rgba(255,80,80,0.15)');
-        g.fillStyle = grad;
-        g.fillRect(x0 - 6, hitY - 3, chartW + 12, 6);
+        const hb = skin?.hitBar;
+        if (hb) {
+          // The skin hit bar is a small tile; stretch it across the lanes.
+          const h = Math.max(4, Math.min(12, hb.height));
+          g.drawImage(hb, x0 - 6, hitY - h / 2, chartW + 12, h);
+        } else {
+          const grad = g.createLinearGradient(0, hitY - 3, 0, hitY + 3);
+          grad.addColorStop(0, 'rgba(255,80,80,0.15)');
+          grad.addColorStop(0.5, '#ff4d4d');
+          grad.addColorStop(1, 'rgba(255,80,80,0.15)');
+          g.fillStyle = grad;
+          g.fillRect(x0 - 6, hitY - 3, chartW + 12, 6);
+        }
       }
     }
 
-    // Advance the "hit" pointer for lane flashes.
+    // Advance the "hit" pointer for lane flashes (and skin hit explosions).
     while (this._visIdx < this.notes.length && this.notes[this._visIdx].time <= now) {
-      this._laneFlash[this.notes[this._visIdx].lane] = this.notes[this._visIdx].time;
+      const n = this.notes[this._visIdx];
+      this._laneFlash[n.lane] = n.time;
+      if (skin) this._fx.push({ lane: n.lane, key: CH_TYPE.get(n.ch), time: n.time });
       this._visIdx++;
     }
 
-    // Lane hit flashes.
+    // Lane hit flashes: the skin's per-lane flush image when available,
+    // otherwise the colored fill.
     if (disp.laneFlash && dark !== 'full') {
       for (let i = 0; i < lanes.length; i++) {
         const dt = now - this._laneFlash[i];
-        if (dt >= 0 && dt < 0.15) {
-          const a = 1 - dt / 0.15;
+        if (dt < 0 || dt >= 0.25) continue;
+        const lw = lanes[i].w * unit;
+        const fl = skin?.flush(lanes[i].id, disp.reverse);
+        if (fl) {
+          // Rises from the hit line (NX anchors it there), fading ~0.25s.
+          const fh = fl.height * (lw / fl.width);
+          g.globalAlpha = 1 - dt / 0.25;
+          g.drawImage(fl, laneX[i], disp.reverse ? hitY : hitY - fh, lw, fh);
+          g.globalAlpha = 1;
+        } else if (dt < 0.15) {
           g.fillStyle = this.colors[lanes[i].id];
-          g.globalAlpha = a * 0.55;
-          const lw = lanes[i].w * unit;
+          g.globalAlpha = (1 - dt / 0.15) * 0.55;
           g.fillRect(laneX[i] + 2, hitY - 26, lw - 4, 52);
           g.globalAlpha = 1;
         }
       }
     }
 
-    // Notes. Chips merged in from a grouped lane keep their own color and
-    // draw slightly inset so they read as "foreign" on the target lane.
+    // Notes. Chips merged in from a grouped lane keep their own color/sprite
+    // and draw slightly inset so they read as "foreign" on the target lane.
     const noteH = 11;
+    // One global animation frame for all chips, like NX's single counter.
+    const chipFrame = skin ? skin.chipFrame(performance.now()) : 0;
     for (let i = lowerBound(this.notes, tMin); i < this.notes.length; i++) {
       const n = this.notes[i];
       if (n.time > tMax) break;
@@ -1007,7 +1059,16 @@ export class Player {
       const inset = foreign ? Math.round(lane.w * unit * 0.12) : 0;
       const lx = laneX[n.lane] + 3 + inset;
       const lw = lane.w * unit - 6 - inset * 2;
-      const color = this.colors[CH_TYPE.get(n.ch)] || this.colors[lane.id];
+      const type = CH_TYPE.get(n.ch);
+      const sp = skin?.chipSprite(type, chipFrame);
+      if (sp) {
+        // Scale the 64px-tall cell by lane width; the art inside is mostly
+        // transparent glow, so the visible chip stays chip-sized.
+        const scale = lw / sp.sw;
+        g.drawImage(sp.bmp, sp.sx, sp.sy, sp.sw, sp.sh, lx, y - 32 * scale, lw, 64 * scale);
+        continue;
+      }
+      const color = this.colors[type] || this.colors[lane.id];
       if (n.ch === 0x18) {
         // Open hi-hat: hollow note.
         g.strokeStyle = color;
@@ -1021,12 +1082,65 @@ export class Player {
       }
     }
 
+    // Skin hit explosions ("chip fire"), additive like NX, ~0.21s lifetime.
+    if (skin) {
+      let w = 0;
+      for (const fx of this._fx) {
+        if (now >= fx.time && now - fx.time <= 0.21) this._fx[w++] = fx;
+      }
+      this._fx.length = w;
+      if (w && disp.laneFlash) {
+        g.save();
+        g.globalCompositeOperation = 'lighter';
+        for (const fx of this._fx) {
+          const img = skin.fire(fx.key);
+          const lane = lanes[fx.lane];
+          if (!img || !lane) continue;
+          const p = (now - fx.time) / 0.21;
+          const lw = lane.w * unit;
+          const dw = lw * 1.6 * (1.2 - 0.8 * p); // expand-then-shrink ease
+          const dh = dw * (img.height / img.width);
+          g.globalAlpha = 1 - p;
+          g.drawImage(img, laneX[fx.lane] + lw / 2 - dw / 2, hitY - dh / 2, dw, dh);
+        }
+        g.restore();
+      }
+    }
+
+    // Skin drum pads just past the hit line, with a short lit flash + bounce
+    // on hit. Suppresses the text label for lanes that show a pad.
+    const padDrawn = new Array(lanes.length).fill(false);
+    if (skin && dark !== 'full') {
+      const band = (disp.reverse ? hitY - y0 : y1 - hitY) - 12;
+      for (let i = 0; i < lanes.length; i++) {
+        const pd = skin.pad(lanes[i].id);
+        if (!pd || band < 24) continue;
+        const lw = lanes[i].w * unit;
+        const s = Math.min(lw, band);
+        const px = laneX[i] + (lw - s) / 2;
+        const py = disp.reverse ? hitY - 10 - s : hitY + 10;
+        g.drawImage(pd.bmp, pd.sx, pd.sy, pd.s, pd.s, px, py, s, s);
+        padDrawn[i] = true;
+        const dt = now - this._laneFlash[i];
+        if (dt >= 0 && dt < 0.11) {
+          const pf = skin.padFlush(lanes[i].id);
+          if (pf) {
+            const bounce = 4 * Math.sin(Math.PI * (dt / 0.11));
+            g.globalAlpha = 1 - dt / 0.11;
+            g.drawImage(pf.bmp, pf.sx, pf.sy, pf.s, pf.s, px, py - bounce, s, s);
+            g.globalAlpha = 1;
+          }
+        }
+      }
+    }
+
     // Lane labels sit just past the hit line.
     if (dark === 'off') {
       g.font = 'bold 12px sans-serif';
       g.textAlign = 'center';
       const labelY = disp.reverse ? hitY - 32 : hitY + 32;
       for (let i = 0; i < lanes.length; i++) {
+        if (padDrawn[i]) continue; // the pad graphic identifies the lane
         const lane = lanes[i];
         g.fillStyle = this.colors[lane.id];
         g.fillText(lane.id, laneX[i] + lane.w * unit / 2, labelY);

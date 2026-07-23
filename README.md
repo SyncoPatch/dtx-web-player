@@ -104,6 +104,15 @@ Scroll and play speed are adjusted with −/+ steppers (hold to repeat).
     and Sudden / Hidden note reveal modes.
   - Changes apply live during playback; "Reset to defaults" restores
     everything.
+  - *Skin*: import a DTXMania / DTXManiaNX skin ZIP (any archive containing a
+    `Graphics` folder with `7_chips_drums.png` etc.) and the play screen uses
+    its artwork — note chips (animated), lane panels, hit bar, background,
+    lane flashes, hit explosions and drum pads — drawn into this app's
+    responsive lane layout, so lane reorder/grouping/hiding still work.
+    Elements missing from a partial skin fall back to the built-in flat
+    drawing; "None (default flat style)" restores it entirely. Skins are
+    stored in the browser like songs (only the gameplay images are kept,
+    ~1–3 MB).
 
 ## What's supported
 
@@ -124,6 +133,7 @@ Scroll and play speed are adjusted with −/+ steppers (hold to repeat).
   `.wma` keysounds are skipped with a warning.
 - On iPad: tap the tab strip to seek, drag to browse, press-and-hold then
   drag to paint a practice loop, pinch to zoom the notation.
-- No BGA / AVI / images, no MIDI, no judgement or scoring.
+- No BGA / AVI, no MIDI, no judgement or scoring. Skins only reskin the play
+  screen (no song-select/result art, gauge, combo or system sounds).
 - Password-protected ZIPs are not supported.
 - Needs a modern browser (uses `DecompressionStream`; Chrome 103+, Edge, Firefox 113+, Safari 16.4+).
