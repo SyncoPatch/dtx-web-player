@@ -92,6 +92,11 @@ export function layoutChart(dtx, opts = {}) {
   }
   const measures = [];
   let prevBpm = null;
+  // dtx.tempoLabels (Map measure number -> BPM) overrides the labels for
+  // charts timed to a recording, whose real tempo changes nearly every
+  // measure: they show the score's tempos instead.
+  const labels = dtx.tempoLabels || null;
+  let label = labels?.get(0) ?? (dtx.bpm || 120);
   for (let i = 0; i <= lastIdx && i < bars.length; i++) {
     const tStart = bars[i].time;
     const beats = bars[i].beats > 0 ? bars[i].beats : 4;
@@ -100,7 +105,8 @@ export function layoutChart(dtx, opts = {}) {
       const spb = measures.length ? measures[measures.length - 1].secPerBeat : 60 / (dtx.bpm || 120);
       tEnd = tStart + beats * spb;
     }
-    const bpm = bpmAt(tStart);
+    if (labels?.has(bars[i].num)) label = labels.get(bars[i].num);
+    const bpm = labels ? label : bpmAt(tStart);
     measures.push({
       num: bars[i].num, beats, tStart, tEnd,
       secPerBeat: (tEnd - tStart) / beats,

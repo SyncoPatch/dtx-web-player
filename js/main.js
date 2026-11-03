@@ -269,7 +269,10 @@ async function importEntries(fallbackTitle, totalSize, entries) {
 // Guitar Pro: each drum track becomes a generated .dtx chart played with a
 // synthesized kit. The original file and a beat-domain model are stored too,
 // so charts can be regenerated (e.g. re-timed to a recording) later.
-const NO_SYNC = { audio: null, kit: true, shiftMs: 0, barTimes: null };
+// audio: the attached recording; barTimes: an alignment's measure starts
+// (audio seconds); align: its summary; pins: [{ bar, time }] marked by ear.
+const NO_SYNC = { audio: null, kit: true, shiftMs: 0, barTimes: null, align: null, pins: [] };
+const NO_TIMING = { shiftMs: 0, barTimes: null, align: null, pins: [] };
 
 // DTX text for a Guitar Pro chart under a song's sync state: the score's own
 // timing with no recording, else timed to the recording placed as BGM.
@@ -578,6 +581,7 @@ async function openChart(song, chartInfo, { fileMap = null, at = 0, autoplay = t
     applyOffset();
     refreshSteppers('offsetChart');
 
+    const shownBpm = await gpDisplayInfo(song, chartInfo, fileMap, dtx);
     const resolve = makeResolver(fileMap, dirname(chartInfo.path));
     const { missing, failed } = await player.load(dtx, resolve, (done, total) => {
       el.overlayText.textContent = `Decoding audio ${done} / ${total}…`;
@@ -586,7 +590,7 @@ async function openChart(song, chartInfo, { fileMap = null, at = 0, autoplay = t
     el.npTitle.textContent = dtx.title || song.title;
     const sub = [];
     if (dtx.artist) sub.push(dtx.artist);
-    sub.push(`BPM ${dtx.bpm}`);
+    sub.push(`BPM ${shownBpm}`);
     if (chartInfo.label) sub.push(chartInfo.label);
     const lvl = fmtLevel(dtx.level);
     if (lvl) sub.push(`Lv ${lvl}`);
@@ -597,7 +601,7 @@ async function openChart(song, chartInfo, { fileMap = null, at = 0, autoplay = t
     currentMeta = {
       title: dtx.title || song.title,
       artist: dtx.artist,
-      bpm: dtx.bpm,
+      bpm: shownBpm,
       level: lvl,
       label: chartInfo.label,
     };
@@ -764,10 +768,11 @@ async function exportChartPdfFromLibrary(song, chartInfo) {
     const blob = fileMap.get(chartInfo.path);
     if (!blob) throw new Error('Chart file missing from local storage.');
     const dtx = parseDTX(decodeText(await blob.arrayBuffer()));
+    const bpm = await gpDisplayInfo(song, chartInfo, fileMap, dtx);
     await exportPdf(dtx, {
       title: dtx.title || song.title,
       artist: dtx.artist,
-      bpm: dtx.bpm,
+      bpm,
       level: fmtLevel(dtx.level),
       label: chartInfo.label,
     });
@@ -825,10 +830,11 @@ async function openChartViewerFromLibrary(song, chartInfo) {
     const blob = fileMap.get(chartInfo.path);
     if (!blob) throw new Error('Chart file missing from local storage.');
     const dtx = parseDTX(decodeText(await blob.arrayBuffer()));
+    const bpm = await gpDisplayInfo(song, chartInfo, fileMap, dtx);
     await openChartViewer(dtx, {
       title: dtx.title || song.title,
       artist: dtx.artist,
-      bpm: dtx.bpm,
+      bpm,
       level: fmtLevel(dtx.level),
       label: chartInfo.label,
     });
@@ -1418,6 +1424,27 @@ async function loadModel(song, path, fileMap) {
   return modelCache.get(key);
 }
 
+// Guitar Pro charts timed to a recording change tempo nearly every measure,
+// so the chart viewer labels them with the score's tempos, and the BPM shown
+// is the score's. Returns the BPM to display.
+async function gpDisplayInfo(song, chartInfo, fileMap, dtx) {
+  if (song.source !== 'guitarpro') return dtx.bpm;
+  const nominal = chartInfo.bpm ?? dtx.bpm;
+  const sync = { ...NO_SYNC, ...song.sync };
+  if (!sync.audio || !chartInfo.model) return nominal;
+  try {
+    const model = await loadModel(song, chartInfo.model, fileMap);
+    const lead = buildTimedChart(model, barTimesForSync(model, sync)).leadBars;
+    const labels = new Map([[0, model.tempos[0].bpm]]);
+    // Labels sit at measure starts; a mid-measure change shows on the next one.
+    for (const t of model.tempos) labels.set(t.bar + lead + (t.tick === 0 ? 0 : 1), t.bpm);
+    dtx.tempoLabels = labels;
+  } catch (err) {
+    console.warn('Tempo labels unavailable:', err);
+  }
+  return nominal;
+}
+
 function bgmTime(dtx) {
   return dtx?.chips.find((c) => c.ch === 0x01)?.time ?? 0;
 }
@@ -1519,8 +1546,7 @@ async function attachRecording() {
     {
       audio: { path, name: file.name, size: file.size, duration: Math.round(buffer.duration * 1000) / 1000 },
       kit: false, // the recording already has the drums
-      shiftMs: 0,
-      barTimes: null,
+      ...NO_TIMING,
     },
     { putFiles: [{ path, origPath: file.name, blob: file }], deletePaths: old && old !== path ? [old] : [] },
   );
@@ -1530,7 +1556,116 @@ function removeRecording() {
   const old = currentSync()?.audio?.path;
   if (!old) return;
   pendingShift = null;
-  applySync({ audio: null, kit: true, shiftMs: 0, barTimes: null }, { deletePaths: [old] });
+  applySync({ audio: null, kit: true, ...NO_TIMING }, { deletePaths: [old] });
+}
+
+// ---- automatic alignment ----
+
+let aligning = null; // { controller, progress, songId } while running
+
+// All charts of a song share its measures; their notes together give the
+// alignment the most to go on.
+async function songAlignModel(song, fileMap) {
+  const models = [];
+  for (const d of song.dtxs) models.push(await loadModel(song, d.model, fileMap));
+  const bars = models[0].bars.map((b, i) => ({ ticks: b.ticks, notes: models.flatMap((m) => m.bars[i]?.notes || []) }));
+  return { ...models[0], bars };
+}
+
+async function autoAlign(pins = currentSync()?.pins || []) {
+  const sync = currentSync();
+  if (!sync?.audio || aligning) return;
+  const { song, fileMap } = current;
+  const controller = new AbortController();
+  aligning = { controller, progress: 0, songId: song.id };
+  buildSyncSection();
+  try {
+    const OAC = window.OfflineAudioContext || window.webkitOfflineAudioContext;
+    const buffer = await new SoundBank(player?.ctx || new OAC(1, 1, 44100)).decode(fileMap.get(sync.audio.path));
+    const model = await songAlignModel(song, fileMap);
+    const { alignRecording } = await import('./align.js');
+    const res = await alignRecording(buffer, model, {
+      pins,
+      signal: controller.signal,
+      onProgress: (p) => { if (aligning) { aligning.progress = p; updateAlignStatus(); } },
+    });
+    aligning = null;
+    if (current?.song.id !== song.id) return; // another song was opened meanwhile
+    const uncertain = res.confidence.map((c, b) => (c !== null && c < 0.35 ? b : -1)).filter((b) => b >= 0);
+    pendingShift = null;
+    await applySync({
+      barTimes: res.barTimes,
+      shiftMs: 0,
+      pins,
+      align: { overall: res.overall, method: res.method, uncertain, at: Date.now() },
+    });
+  } catch (err) {
+    aligning = null;
+    if (err.name !== 'AbortError') {
+      console.error(err);
+      alert(`Auto-align failed:\n${err.message}`);
+    }
+    buildSyncSection();
+  }
+}
+
+// Pins the measure nearest the playhead to this point of the recording (as
+// heard, so minus the output latency the display offset compensates), then
+// re-aligns. Pins are soft (±0.25 s), so tapping a little late is fine.
+async function pinAtPlayhead() {
+  const sync = currentSync();
+  if (!sync?.audio || !player || aligning) return;
+  const { song, chartInfo, fileMap } = current;
+  const model = await loadModel(song, chartInfo.model, fileMap);
+  const now = player.time - bgmTime(currentDtx) - (settings.offsetMs / 1000) * player.playSpeed;
+  const times = barTimesForSync(model, sync);
+  let bar = 0;
+  for (let b = 1; b < model.bars.length; b++) if (Math.abs(times[b] - now) < Math.abs(times[bar] - now)) bar = b;
+  // Keep the pins in order: drop any the new one contradicts.
+  const pins = (sync.pins || []).filter((p) => p.bar !== bar && (p.bar < bar ? p.time < now : p.time > now));
+  pins.push({ bar, time: now });
+  pins.sort((a, b) => a.bar - b.bar);
+  autoAlign(pins);
+}
+
+function leadBarsNow() {
+  const sync = currentSync();
+  const model = current && modelCache.get(`${current.song.id}::${current.chartInfo.model}`);
+  if (!sync?.audio || !model) return 0;
+  try { return buildTimedChart(model, barTimesForSync(model, sync)).leadBars; } catch { return 0; }
+}
+
+// Measure numbers as the player shows them (lead-in measures included).
+function measureList(bars) {
+  const lead = leadBarsNow();
+  const nums = bars.map((b) => b + lead);
+  const parts = [];
+  for (let i = 0; i < nums.length; i++) {
+    let j = i;
+    while (j + 1 < nums.length && nums[j + 1] === nums[j] + 1) j++;
+    const a = String(nums[i]).padStart(3, '0');
+    parts.push(j > i ? `${a}–${String(nums[j]).padStart(3, '0')}` : a);
+    i = j;
+  }
+  return parts.length > 6 ? parts.slice(0, 6).join(', ') + ', …' : parts.join(', ');
+}
+
+function alignStatusText(sync) {
+  if (aligning && aligning.songId === current?.song.id) return `Aligning… ${Math.round(aligning.progress * 100)}%`;
+  const a = sync.align;
+  if (!a) return 'Not aligned yet. Auto-align times every measure to the recording.';
+  const pct = Math.round(a.overall * 100);
+  let text = `${a.method === 'constant' ? 'Steady tempo' : 'Follows the recording’s tempo'} · ${pct}% confident.`;
+  if (a.overall < 0.5) text += ' This may be wrong: while it plays, press P at a few downbeats to pin them, which re-aligns.';
+  else if (a.uncertain?.length) text += ` Uncertain: measure${a.uncertain.length > 1 ? 's' : ''} ${measureList(a.uncertain)}.`;
+  if (sync.pins?.length) text += ` ${sync.pins.length} pinned.`;
+  return text;
+}
+
+function updateAlignStatus() {
+  const node = document.getElementById('sync-align-status');
+  const sync = currentSync();
+  if (node && sync) node.textContent = alignStatusText(sync);
 }
 
 function buildSyncSection() {
@@ -1586,6 +1721,32 @@ function buildSyncSection() {
     const fine = makeStepper('syncFine');
     fine.el.title = 'Fine shift, 5 ms steps.';
     row('Fine shift', fine.el);
+
+    const running = aligning && aligning.songId === current.song.id;
+    const alignActions = document.createElement('span');
+    if (running) {
+      alignActions.append(button('Cancel', () => aligning?.controller.abort()));
+    } else {
+      alignActions.append(button(sync.align ? 'Re-align' : 'Auto-align', () => autoAlign(),
+        'Find where every measure falls in the recording, following its tempo changes.'));
+      if (sync.barTimes || sync.pins?.length) {
+        alignActions.append(button('Reset', () => applySync({ ...NO_TIMING }), 'Back to the score’s own tempo (clears the alignment, pins and shift).'));
+      }
+    }
+    row('Timing', alignActions).classList.add('sync-recording');
+    const status = document.createElement('span');
+    status.id = 'sync-align-status';
+    status.className = 'sync-status';
+    status.textContent = alignStatusText(sync);
+    wrap.append(status);
+
+    if (!running) {
+      const pinActions = document.createElement('span');
+      pinActions.append(button('Pin (P)', pinAtPlayhead,
+        'While the recording plays, press at a downbeat: the nearest measure is pinned there and the chart re-aligns. Shortcut: P.'));
+      if (sync.pins?.length) pinActions.append(button('Clear', () => applySync({ pins: [] }), 'Forget the pinned measures (keeps the current timing).'));
+      row('Pins', pinActions).classList.add('sync-recording');
+    }
   }
 }
 
@@ -1633,6 +1794,9 @@ document.addEventListener('keydown', (e) => {
     // so this always means play/pause and never re-clicks a toggle.
     e.preventDefault();
     $('btn-play').click();
+  } else if (e.code === 'KeyP' && !e.metaKey && !e.ctrlKey && !e.altKey && currentSync()?.audio) {
+    e.preventDefault();
+    pinAtPlayhead();
   }
 });
 

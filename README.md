@@ -43,6 +43,15 @@ browsers may cache files — hard-reload (Cmd+Shift+R) after updating.
   with an intro gets empty lead-in measures, so measure numbers then count
   those too. Unlike the display offsets, the shift re-times the chart itself,
   so the tab strip, loops and kit sounds follow it.
+- **Auto-align** (same section) — analyses the recording in a Web Worker and
+  finds where every measure falls, following tempo drift (a few seconds for a
+  typical song). It finds the intro length and overall tempo, then tracks the
+  measures one by one against kick / snare / cymbal onsets; a click-tracked
+  recording gets a steady tempo. A confidence figure and any uncertain
+  measures are shown. If it looks wrong, press **P** (or "Pin") at a few
+  downbeats while the recording plays: the nearest measure is pinned there
+  (tapping a little late is fine) and the chart re-aligns. **Reset** returns
+  to the score's own tempo. The shift steppers still nudge the result.
 - **Import URL** — download and import a ZIP directly from a URL. The hosting
   server must allow cross-origin requests (CORS); if it doesn't, download the
   file and use Import ZIP instead.
@@ -161,4 +170,8 @@ Scroll and play speed are adjusted with −/+ steppers (hold to repeat).
   percussion with no drum lane (tambourine, cowbell, congas, …) is skipped with
   a warning; both bass-drum pedals land on BD; ghost-note dynamics are not
   kept. The synthesized kit is a preview sound, not a realistic kit.
+- Auto-align expects the recording to follow the tab's structure: a live
+  version with extra or missing sections won't line up (pins help only
+  locally), and tempos more than about 20% off the tab need pins. Dense or
+  heavily compressed mixes give less certain results.
 - Needs a modern browser (uses `DecompressionStream`; Chrome 103+, Edge, Firefox 113+, Safari 16.4+).
