@@ -8,6 +8,8 @@
 //   tempos: [{ bar, tick, bpm }],     // sorted; the first one is the start tempo
 // }
 // options.wavs: Map<channel, file> of the sound played by each drum channel.
+// options.kitVolume: 0-100 volume of those sounds (default 100).
+// options.bgm: { file, bar, tick } places a recording on the BGM channel.
 
 const MAX_MEASURES = 1000;  // measure numbers are 3 decimal digits
 const MAX_BPM_DEFS = 1295;  // #BPM01..#BPMZZ
@@ -67,7 +69,7 @@ function roundTempos(model, tempos, start, total, decimals) {
   return out;
 }
 
-export function writeDtx(model, tempoMap = model.tempos, { wavs = new Map() } = {}) {
+export function writeDtx(model, tempoMap = model.tempos, { wavs = new Map(), kitVolume = 100, bgm = null } = {}) {
   if (!model.bars.length) throw new Error('This chart has no measures.');
   if (model.bars.length > MAX_MEASURES) {
     throw new Error(`This chart has ${model.bars.length} measures; DTX supports ${MAX_MEASURES}.`);
@@ -77,6 +79,9 @@ export function writeDtx(model, tempoMap = model.tempos, { wavs = new Map() } = 
     b.notes.every((n) => Number.isInteger(n.tick) && n.tick >= 0 && n.tick < b.ticks)) &&
     tempoMap.every((t) => Number.isInteger(t.tick) && t.tick >= 0 && t.tick < (model.bars[t.bar]?.ticks ?? 0));
   if (!ticksOk) throw new Error('Chart positions must be whole ticks inside their measure.');
+  if (bgm && !(Number.isInteger(bgm.tick) && bgm.tick >= 0 && bgm.tick < (model.bars[bgm.bar]?.ticks ?? 0))) {
+    throw new Error('The recording position must be a whole tick inside a measure.');
+  }
 
   // Coarser rounding merges near-identical tempos, which keeps a densely
   // anchored chart within the #BPMxx limit.
@@ -94,6 +99,8 @@ export function writeDtx(model, tempoMap = model.tempos, { wavs = new Map() } = 
 
   const wavIds = new Map();
   for (const ch of wavs.keys()) wavIds.set(ch, wavIds.size + 1);
+  const bgmId = wavIds.size + 1;
+  const volume = Math.max(0, Math.min(100, Math.round(kitVolume)));
 
   const lines = [
     `#TITLE: ${headerValue(model.title)}`,
@@ -101,7 +108,12 @@ export function writeDtx(model, tempoMap = model.tempos, { wavs = new Map() } = 
     `#BPM: ${tempos[0].bpm}`,
     '',
   ];
-  for (const [ch, file] of wavs) lines.push(`#WAV${base36(wavIds.get(ch))}: ${headerValue(file)}`);
+  for (const [ch, file] of wavs) {
+    const id = base36(wavIds.get(ch));
+    lines.push(`#WAV${id}: ${headerValue(file)}`);
+    if (volume !== 100) lines.push(`#VOLUME${id}: ${volume}`);
+  }
+  if (bgm) lines.push(`#WAV${base36(bgmId)}: ${headerValue(bgm.file)}`);
   for (const [bpm, id] of bpmIds) lines.push(`#BPM${base36(id)}: ${bpm}`);
   lines.push('');
 
@@ -126,6 +138,10 @@ export function writeDtx(model, tempoMap = model.tempos, { wavs = new Map() } = 
     if (here) {
       const events = here.map((t) => ({ tick: t.tick, id: bpmIds.get(t.bpm) }));
       lines.push(`#${measure(m)}08: ${objectData(events, bar.ticks)}`);
+    }
+
+    if (bgm && bgm.bar === m) {
+      lines.push(`#${measure(m)}01: ${objectData([{ tick: bgm.tick, id: bgmId }], bar.ticks)}`);
     }
 
     const byChannel = new Map();

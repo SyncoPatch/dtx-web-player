@@ -138,6 +138,9 @@ async function renderPiece(ch) {
   return encodeWav(data, RATE);
 }
 
+// Map<channel, stored path> of the kit, without rendering it.
+export const KIT_FILES = new Map([...PIECES].map(([ch, [file]]) => [ch, 'kit/' + file]));
+
 let kit = null;
 
 // Map<channel, { file, blob }>, rendered once per page load.

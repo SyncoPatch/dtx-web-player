@@ -213,9 +213,16 @@ button, input, select { touch-action: manipulation; }
   display: flex; align-items: center; gap: 4px;
   font-size: 12px; color: var(--dim); cursor: pointer;
 }
-#display-opts, #playback-opts {
+#display-opts, #playback-opts, #sync-opts {
   display: flex; flex-direction: column; gap: 7px; min-width: 210px;
 }
+#sync-opts { max-width: 280px; }
+#sync-opts .display-row > :last-child { margin-left: auto; }
+#sync-opts .panel-note { margin: 0; font-size: 12px; color: var(--dim); line-height: 1.4; }
+#sync-opts .sync-recording { cursor: default; }
+#sync-opts .sync-file { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; flex: 1; }
+#sync-opts .sync-recording > :last-child { display: flex; gap: 4px; flex-shrink: 0; }
+#sync-opts .sync-status { font-size: 12px; color: var(--dim); line-height: 1.4; }
 .panel-box .display-row {
   display: flex; align-items: center; gap: 8px;
   font-size: 13px; cursor: pointer;

@@ -35,6 +35,14 @@ browsers may cache files — hard-reload (Cmd+Shift+R) after updating.
   The same button accepts **Guitar Pro** files (`.gp`, `.gp3`, `.gp4`, `.gp5`,
   `.gpx`): each drum track becomes a chart, with repeats and D.S./coda jumps
   played out in order, voiced by a built-in synthesized drum kit.
+- **Recording** (Settings, with a Guitar Pro chart open) — attach an audio file
+  of the song (OGG / MP3 / WAV / M4A…); it is stored with the song and plays as
+  the chart's BGM. The drum kit is muted by default once a recording is
+  attached (toggle "Play drum kit"). **Shift chart** (100 ms steps) and
+  **Fine shift** (5 ms) move the chart against the recording; a recording
+  with an intro gets empty lead-in measures, so measure numbers then count
+  those too. Unlike the display offsets, the shift re-times the chart itself,
+  so the tab strip, loops and kit sounds follow it.
 - **Import URL** — download and import a ZIP directly from a URL. The hosting
   server must allow cross-origin requests (CORS); if it doesn't, download the
   file and use Import ZIP instead.

@@ -173,6 +173,7 @@ export class Player {
     this.bank = new SoundBank(this.ctx);
     this.stretcher = new Stretcher();
     this._stretched = new Map(); // wavId -> stretched AudioBuffer (playSpeed != 1)
+    this._stretchCache = new WeakMap(); // source AudioBuffer -> { speed, buffer }, latest speed only
     this._stretchGen = 0;
     this._chartEnd = 0;
 
@@ -563,6 +564,13 @@ export class Player {
     const newMap = new Map();
     let done = 0;
     for (const [id, buf] of targets) {
+      // Reloading the same recording at the same speed reuses its stretch.
+      const cached = this._stretchCache.get(buf);
+      if (cached && cached.speed === speed) {
+        newMap.set(id, cached.buffer);
+        done++;
+        continue;
+      }
       const channels = [];
       for (let ch = 0; ch < buf.numberOfChannels; ch++) channels.push(buf.getChannelData(ch).slice());
       const out = await this.stretcher.stretch(channels, buf.sampleRate, speed, (p) => {
@@ -572,6 +580,7 @@ export class Player {
       const nb = this.ctx.createBuffer(buf.numberOfChannels, out[0].length, buf.sampleRate);
       for (let ch = 0; ch < out.length; ch++) nb.copyToChannel(out[ch], ch);
       newMap.set(id, nb);
+      this._stretchCache.set(buf, { speed, buffer: nb });
       done++;
       this.onStretchProgress?.(done / targets.length);
     }
