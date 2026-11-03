@@ -19,7 +19,7 @@
   <header class="topbar">
     <h1>DTX Web Player</h1>
     <div class="actions">
-      <button id="btn-import-zip" class="btn primary">Import ZIP</button>
+      <button id="btn-import-zip" class="btn primary" title="DTX song ZIPs or Guitar Pro files (.gp, .gp3–.gp5, .gpx)">Import ZIP / GP</button>
       <button id="btn-import-url" class="btn">Import URL</button>
       <button id="btn-import-folder" class="btn">Import Folder</button>
       <button id="btn-settings" class="btn">Settings</button>
@@ -27,11 +27,11 @@
   </header>
   <p id="empty-hint" hidden>
     No songs yet. Import a ZIP containing .dtx chart files and their audio
-    (OGG / WAV / MP3). Imported songs are stored in this browser so they stay
-    available next time.
+    (OGG / WAV / MP3), or a Guitar Pro file with a drum track. Imported songs
+    are stored in this browser so they stay available next time.
   </p>
   <ul id="song-list"></ul>
-  <input type="file" id="file-zip" accept=".zip,application/zip" multiple hidden>
+  <input type="file" id="file-zip" accept=".zip,application/zip,.gp,.gp3,.gp4,.gp5,.gpx" multiple hidden>
   <input type="file" id="file-folder" webkitdirectory hidden>
   <input type="file" id="file-skin" accept=".zip,application/zip" hidden>
 </main>

@@ -5,6 +5,9 @@ import { parseDTX, parseSetDef, decodeText } from './dtx.js';
 import { listSongs, addSong, deleteSong, getSongFiles, listSkins, addSkin, deleteSkin } from './db.js';
 import { Player, NOTE_TYPES, LANE_IDS, GROUP_RULES, defaultColors, defaultDisplay } from './player.js';
 import { Skin, collectSkinFiles } from './skin.js';
+import { isGuitarProFile, convertGuitarPro } from './gp.js'; // alphaTab itself loads lazily
+import { writeDtx } from './dtxwrite.js';
+import { renderDrumKit } from './drumkit.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -260,8 +263,61 @@ async function importEntries(fallbackTitle, totalSize, entries) {
   return song;
 }
 
+// Guitar Pro: each drum track becomes a generated .dtx chart played with a
+// synthesized kit. The original file and a beat-domain model are stored too,
+// so charts can be regenerated (e.g. re-timed to a recording) later.
+async function importGuitarPro(file) {
+  showOverlay(`Reading ${file.name}…`);
+  const gp = await convertGuitarPro(new Uint8Array(await file.arrayBuffer()));
+  showOverlay(`Importing ${file.name}…`);
+  const kit = await renderDrumKit();
+  const wavs = new Map([...kit].map(([ch, k]) => [ch, k.file]));
+
+  const files = [{ path: normPath('source/' + basename(file.name)), origPath: file.name, blob: file }];
+  for (const k of kit.values()) files.push({ path: k.file, origPath: k.file, blob: k.blob });
+
+  const dtxs = [];
+  const warnings = [];
+  gp.charts.forEach((chart, i) => {
+    const stem = gp.charts.length > 1 ? `drums-${i + 1}` : 'drums';
+    const text = writeDtx(chart.model, chart.model.tempos, { wavs });
+    files.push({ path: stem + '.dtx', origPath: stem + '.dtx', blob: new Blob(['\uFEFF' + text], { type: 'text/plain' }) });
+    files.push({ path: stem + '.model.json', origPath: stem + '.model.json', blob: new Blob([JSON.stringify(chart.model)], { type: 'application/json' }) });
+    dtxs.push({
+      path: stem + '.dtx',
+      title: chart.model.title || stem,
+      label: chart.name,
+      level: null,
+      bpm: Math.round(chart.model.tempos[0].bpm * 100) / 100,
+      model: stem + '.model.json',
+    });
+    for (const w of chart.warnings) warnings.push(gp.charts.length > 1 ? `${chart.name}: ${w}` : w);
+  });
+
+  const song = {
+    id: crypto.randomUUID(),
+    title: gp.title || file.name.replace(/\.[^.]+$/, ''),
+    dtxs,
+    addedAt: Date.now(),
+    size: files.reduce((a, f) => a + f.blob.size, 0),
+    source: 'guitarpro',
+  };
+  await addSong(song, files);
+  return warnings;
+}
+
 async function importZipFiles(fileList) {
   for (const file of fileList) {
+    if (isGuitarProFile(file.name)) {
+      try {
+        const warnings = await importGuitarPro(file);
+        if (warnings.length) alert(`Imported ${file.name} with warnings:\n\n${warnings.join('\n')}`);
+      } catch (err) {
+        console.error(err);
+        alert(`Failed to import ${file.name}:\n${err.message}`);
+      }
+      continue;
+    }
     try {
       showOverlay(`Extracting ${file.name}…`);
       const entries = await extractZip(await file.arrayBuffer());

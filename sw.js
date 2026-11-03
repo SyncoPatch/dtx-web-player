@@ -1,7 +1,7 @@
 // App-shell service worker: cache-first for the static shell so the app
 // loads offline (songs already live in IndexedDB). Bump VERSION on deploys
 // that change any shell file.
-const VERSION = 'dtx-shell-v4';
+const VERSION = 'dtx-shell-v5';
 
 const SHELL = [
   './',
@@ -18,6 +18,11 @@ const SHELL = [
   './js/pdf.js',
   './js/score.js',
   './js/chartview.js',
+  './js/skin.js',
+  './js/gp.js',
+  './js/dtxwrite.js',
+  './js/drumkit.js',
+  './js/vendor/alphatab/alphaTab.core.min.mjs',
   './js/vendor/stbvorbis.js',
   './js/vendor/stbvorbis_asm.js',
   './manifest.webmanifest',

@@ -10,7 +10,10 @@ Drum mode only, autoplay only — it parses `.dtx` charts, plays the keysounds/B
 with sample-accurate Web Audio scheduling, and renders a DTXMania-style falling-notes
 lane view. No gameplay judgement or scoring.
 
-No build step, no dependencies — plain ES modules.
+No build step and no package manager — plain ES modules. Two third-party
+libraries are vendored unmodified under `js/vendor/` and loaded only when
+needed: an OGG decoder for Safari and [alphaTab](https://github.com/CoderLine/alphaTab)
+(MPL-2.0) for reading Guitar Pro files.
 
 ## Running
 
@@ -27,8 +30,11 @@ browsers may cache files — hard-reload (Cmd+Shift+R) after updating.
 
 ## Usage
 
-- **Import ZIP** — pick one or more `.zip` files, each containing `.dtx` chart(s)
+- **Import ZIP / GP** — pick one or more `.zip` files, each containing `.dtx` chart(s)
   and their audio files (subfolders are fine; Shift-JIS file names are handled).
+  The same button accepts **Guitar Pro** files (`.gp`, `.gp3`, `.gp4`, `.gp5`,
+  `.gpx`): each drum track becomes a chart, with repeats and D.S./coda jumps
+  played out in order, voiced by a built-in synthesized drum kit.
 - **Import URL** — download and import a ZIP directly from a URL. The hosting
   server must allow cross-origin requests (CORS); if it doesn't, download the
   file and use Import ZIP instead.
@@ -121,6 +127,12 @@ Scroll and play speed are adjusted with −/+ steppers (hold to repeat).
   (`03` direct and `08` extended), visible drum chips (`11`–`1C`), hidden chips
   (`31`–`3C`, sound only), auto SE (`61`–`92`)
 - `SET.def` for song title and difficulty labels
+- Guitar Pro 3–8 drum tracks (read with the vendored alphaTab importer). General
+  MIDI drum sounds map to the lanes: kick → BD; snare, side stick and clap → SD;
+  closed / open / pedal hi-hat → HH / open HH / LP; high, mid/low and floor toms →
+  HT / LT / FT; crash, china and splash → CY; crash 2 → LC; ride and ride bell → RD.
+  Each imported chart is generated as a regular `.dtx`, so every player feature
+  (tab strip, loop, play speed, PDF and chart image export) works on it.
 - Shift-JIS / UTF-8 / UTF-16 chart encodings; Shift-JIS ZIP entry names
 - Hi-hat choke (close/open/pedal cut each other off), same-WAV retrigger cutoff
 - WAV references resolve with alternate audio extensions (a chart saying `.wav`
@@ -136,4 +148,9 @@ Scroll and play speed are adjusted with −/+ steppers (hold to repeat).
 - No BGA / AVI, no MIDI, no judgement or scoring. Skins only reskin the play
   screen (no song-select/result art, gauge, combo or system sounds).
 - Password-protected ZIPs are not supported.
+- Guitar Pro: only drum tracks are imported (guitar and bass parts are
+  ignored), and only from the file picker (not from ZIPs or URLs). Hand
+  percussion with no drum lane (tambourine, cowbell, congas, …) is skipped with
+  a warning; both bass-drum pedals land on BD; ghost-note dynamics are not
+  kept. The synthesized kit is a preview sound, not a realistic kit.
 - Needs a modern browser (uses `DecompressionStream`; Chrome 103+, Edge, Firefox 113+, Safari 16.4+).
