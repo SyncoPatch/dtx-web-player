@@ -3,7 +3,10 @@
 // Primary path is the browser's decodeAudioData. Safari (iPad/iPhone) cannot
 // decode OGG Vorbis — which most DTX packages use — so a vendored WASM
 // decoder (js/vendor/stbvorbis.js, Apache-2.0) is lazily loaded as a
-// fallback when native decoding fails on an OGG file.
+// fallback when native decoding fails on an OGG file. BandJAM XA (.xa), which
+// no browser supports, is recognized by its magic and decoded in js/xa.js.
+
+import { isXA, decodeXA } from './xa.js';
 
 let vorbisReady = null;
 
@@ -71,11 +74,19 @@ export class SoundBank {
     this.sounds.clear();
   }
 
-  // Decode one file with the native decoder, falling back to the vendored
-  // Vorbis decoder for OGG data the browser rejects (Safari).
+  // Decode one file: XA with our own decoder, everything else natively,
+  // falling back to the vendored Vorbis decoder for OGG data the browser
+  // rejects (Safari).
   async decode(blob) {
+    const data = await blob.arrayBuffer();
+    if (isXA(data)) {
+      const { sampleRate, channels } = decodeXA(data);
+      const buffer = this.ctx.createBuffer(channels.length, channels[0].length || 1, sampleRate);
+      channels.forEach((d, ch) => buffer.copyToChannel(d, ch));
+      return buffer;
+    }
     try {
-      return await this.ctx.decodeAudioData(await blob.arrayBuffer());
+      return await this.ctx.decodeAudioData(data);
     } catch (err) {
       const raw = await blob.arrayBuffer(); // decodeAudioData detached the first copy
       if (raw.byteLength >= 4 && isOgg(raw)) {

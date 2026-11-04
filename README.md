@@ -128,9 +128,11 @@ Scroll and play speed are adjusted with −/+ steppers (hold to repeat).
 
 ## Limitations
 
-- Audio: OGG / WAV / MP3 (and usually FLAC/M4A). On Safari/iPad, OGG is
-  decoded by a vendored WASM decoder (`js/vendor/stbvorbis.js`). `.xa` and
-  `.wma` keysounds are skipped with a warning.
+- Audio: OGG / WAV / MP3 / XA (and usually FLAC/M4A). On Safari/iPad, OGG is
+  decoded by a vendored WASM decoder (`js/vendor/stbvorbis.js`). BandJAM XA
+  (`.xa`) is decoded by `js/xa.js`, written from the format documented by
+  [bjxa](https://sr.ht/~dridi/bjxa/). `.wma` keysounds are skipped with a
+  warning.
 - On iPad: tap the tab strip to seek, drag to browse, press-and-hold then
   drag to paint a practice loop, pinch to zoom the notation.
 - No BGA / AVI, no MIDI, no judgement or scoring. Skins only reskin the play
