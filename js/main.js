@@ -177,9 +177,9 @@ function stripExt(p) {
 
 // Resolve a WAV reference relative to the chart's directory, with fallbacks:
 // alternate audio extensions (DTXMania does this too — charts often say .wav
-// or .xa while the package ships .ogg), then a basename search anywhere in
+// or .xa while the package ships .ogg, or vice versa), then a basename search anywhere in
 // the archive.
-const AUDIO_EXTS = ['.ogg', '.wav', '.mp3', '.m4a', '.flac', '.aac', '.opus', '.webm'];
+const AUDIO_EXTS = ['.ogg', '.wav', '.mp3', '.m4a', '.flac', '.aac', '.opus', '.webm', '.xa'];
 
 function makeResolver(fileMap, baseDir) {
   return (ref) => {
@@ -526,7 +526,7 @@ async function openChart(song, chartInfo) {
       el.npWarn.textContent = `⚠ ${problems} sound${problems > 1 ? 's' : ''} unavailable`;
       el.npWarn.title =
         (missing.length ? `Missing files:\n${missing.join('\n')}\n` : '') +
-        (failed.length ? `Could not decode (unsupported format, e.g. .xa/.wma):\n${failed.join('\n')}` : '');
+        (failed.length ? `Could not decode (unsupported format, e.g. .wma):\n${failed.join('\n')}` : '');
     } else {
       el.npWarn.textContent = '';
       el.npWarn.title = '';
