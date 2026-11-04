@@ -1407,7 +1407,7 @@ function buildPlaybackSection() {
 
 // ---- recording sync (Guitar Pro charts) ----
 
-const AUDIO_ACCEPT = 'audio/*,.ogg,.mp3,.wav,.m4a,.aac,.flac,.opus,.webm';
+const AUDIO_ACCEPT = 'audio/*,.ogg,.mp3,.wav,.m4a,.aac,.flac,.opus,.webm,.xa';
 const modelCache = new Map(); // `${songId}::${path}` -> parsed model.json
 
 function currentSync() {
@@ -1536,7 +1536,7 @@ async function attachRecording() {
     buffer = await new SoundBank(player?.ctx || new OAC(1, 1, 44100)).decode(file);
   } catch {
     hideOverlay();
-    alert(`Could not decode ${file.name}. Try an OGG, MP3, WAV or M4A file.`);
+    alert(`Could not decode ${file.name}. Try an OGG, MP3, WAV, M4A or XA file.`);
     return;
   }
   const path = normPath('audio/' + basename(file.name));
