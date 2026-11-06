@@ -195,7 +195,27 @@ class Wrapper(torch.nn.Module):
         return y.reshape(1, -1, 2, self.chunk)
 
 
+def stub_diffq():
+    """demucs imports diffq (model quantization) at module load, but only
+    uses it for quantized checkpoints. diffq has no wheels and needs a C
+    compiler, so stand in a stub that fails loudly if it is ever used."""
+    try:
+        import diffq  # noqa: F401
+        return
+    except ImportError:
+        pass
+
+    def unavailable(*args, **kwargs):
+        raise SystemExit('This checkpoint is quantized and needs the real diffq package (pip install diffq).')
+
+    stub = types.ModuleType('diffq')
+    stub.DiffQuantizer = stub.UniformQuantizer = unavailable
+    stub.restore_quantized_state = unavailable
+    sys.modules['diffq'] = stub
+
+
 def load_msst(msst, model_type, config_path, checkpoint):
+    stub_diffq()
     sys.path.insert(0, os.path.abspath(os.path.expanduser(msst)))
     try:
         from utils.settings import get_model_from_config
