@@ -56,6 +56,8 @@ class ConvSTFT(torch.nn.Module):
 
     def __init__(self, n_fft, hop, normalized=False):
         super().__init__()
+        if n_fft % hop:
+            raise SystemExit(f'n_fft {n_fft} must be a multiple of hop {hop}')
         self.n_fft, self.hop, self.normalized = n_fft, hop, normalized
         n = torch.arange(n_fft, dtype=torch.float64)
         k = torch.arange(n_fft // 2 + 1, dtype=torch.float64)
@@ -73,12 +75,10 @@ class ConvSTFT(torch.nn.Module):
         inv = inv * win
         if normalized:
             inv = inv * math.sqrt(n_fft)
-        # Persistent buffers of a registered submodule become ONNX initializers
-        # with known shapes; the exporter rejects convolutions whose kernel
-        # shape it can't see.
-        self.register_buffer('fwd', fwd.float()[:, None, :])
-        self.register_buffer('inv', inv.float()[:, None, :])
-        self.register_buffer('win2', (win ** 2).float()[None, None, :])
+        # Persistent buffers of a registered submodule become ONNX initializers.
+        self.register_buffer('fwd', fwd.float()[:, None, :])  # conv1d kernel
+        self.register_buffer('inv', inv.float())  # (2F, n_fft) matmul weight
+        self.register_buffer('win2', (win ** 2).float())
 
     def forward(self, x):
         """x: (..., time) -> (..., 2, freq, frames)."""
@@ -90,14 +90,29 @@ class ConvSTFT(torch.nn.Module):
         nf = self.n_fft // 2 + 1
         return y.reshape(*lead, 2, nf, y.shape[-1])
 
+    def _overlap_add(self, y):
+        """(M, frames, n_fft) frames hop apart -> (M, (frames-1)*hop + n_fft)."""
+        m, frames = y.shape[0], y.shape[1]
+        r = self.n_fft // self.hop
+        y = y.reshape(m, frames, r, self.hop)
+        out = None
+        for q in range(r):
+            seg = y[:, :, q, :].reshape(m, frames * self.hop)
+            seg = F.pad(seg, (q * self.hop, (r - 1 - q) * self.hop))
+            out = seg if out is None else out + seg
+        return out
+
     def inverse(self, z, length=None):
         """z: (..., 2, freq, frames) -> (..., time)."""
+        # A matmul gives every frame's windowed signal, and overlap-add is
+        # done with pads and adds. (A transposed convolution would be one op,
+        # but the TorchScript ONNX exporter rejects it when shapes are
+        # computed at trace time.)
         lead = z.shape[:-3]
         nf, frames = z.shape[-2], z.shape[-1]
-        z = z.reshape(-1, 2 * nf, frames)
-        y = F.conv_transpose1d(z, self.inv, stride=self.hop)  # (M, 1, (frames-1)*hop + n_fft)
-        env = F.conv_transpose1d(torch.ones(1, 1, frames, dtype=z.dtype, device=z.device),
-                                 self.win2, stride=self.hop)
+        z = z.reshape(-1, 2 * nf, frames).transpose(1, 2)  # (M, frames, 2F)
+        y = self._overlap_add(torch.matmul(z, self.inv))  # (M, (frames-1)*hop + n_fft)
+        env = self._overlap_add(self.win2.expand(1, frames, self.n_fft))
         p = self.n_fft // 2
         if length is None:
             length = self.hop * (frames - 1)
@@ -353,7 +368,9 @@ def selftest():
         e3 = sdr(x.numpy(), got_back.numpy())
         print(f'n_fft {n_fft} hop {hop} normalized {normalized}: stft {e1:.1f} dB, istft {e2:.1f} dB, roundtrip {e3:.1f} dB')
         worst = min(worst or 1e9, e1, e2, e3)
-    print('OK' if worst > 80 else 'FAIL')
+    if worst <= 80:
+        raise SystemExit('FAIL: the real-valued STFT does not match torch')
+    print('OK')
 
 
 def main():
