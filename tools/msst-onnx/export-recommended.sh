@@ -34,16 +34,18 @@ if [ ! -x venv/bin/python ]; then
   echo "== venv ($PY)"
   "$PY" -m venv venv
 fi
-if [ ! -f venv/.deps-ok ]; then
+# Bump the marker name when the package list changes, so re-runs install it.
+if [ ! -f venv/.deps-ok-2 ]; then
   echo "== python packages"
   venv/bin/pip install -q --upgrade pip
   # torch 2.8 still defaults to the TorchScript ONNX exporter export.py uses.
-  venv/bin/pip install -q "torch==2.8.0" "numpy<2.3" ml_collections omegaconf pyyaml einops \
-    julius dora-search librosa soundfile onnx onnxruntime onnxconverter-common beartype \
-    rotary_embedding_torch
-  # demucs 4.0.0 pins an old torchaudio; only its model code is needed.
-  venv/bin/pip install -q --no-deps "demucs==4.0.0"
-  touch venv/.deps-ok
+  venv/bin/pip install -q "torch==2.8.0" "torchaudio==2.8.0" "numpy<2.3" ml_collections omegaconf \
+    pyyaml einops julius dora-search tqdm librosa soundfile onnx onnxruntime onnxconverter-common \
+    beartype rotary_embedding_torch
+  # demucs 4.0.0 pins an old torchaudio, and openunmix (its Wiener filter)
+  # would pull its own; only their model code is needed.
+  venv/bin/pip install -q --no-deps "demucs==4.0.0" openunmix
+  touch venv/.deps-ok-2
 fi
 
 if [ ! -d MSST/.git ]; then

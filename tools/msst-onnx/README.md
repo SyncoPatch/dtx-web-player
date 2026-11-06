@@ -33,9 +33,9 @@ the export doesn't need them.
 ```sh
 git clone https://github.com/ZFTurbo/Music-Source-Separation-Training ~/src/MSST
 python3.10 -m venv ~/msst-venv && source ~/msst-venv/bin/activate
-pip install "torch==2.8.0" "numpy<2.3" ml_collections omegaconf pyyaml einops julius dora-search \
-  librosa soundfile onnx onnxruntime onnxconverter-common beartype rotary_embedding_torch
-pip install --no-deps "demucs==4.0.0"   # its pinned torchaudio is not needed
+pip install "torch==2.8.0" "torchaudio==2.8.0" "numpy<2.3" ml_collections omegaconf pyyaml einops \
+  julius dora-search tqdm librosa soundfile onnx onnxruntime onnxconverter-common beartype rotary_embedding_torch
+pip install --no-deps "demucs==4.0.0" openunmix   # skip their old torch/torchaudio pins
 
 python export.py --selftest   # checks the STFT replacement against torch (no MSST needed)
 ```
