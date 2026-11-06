@@ -53,6 +53,10 @@ async function makeEncoder(sampleRate, channels, bps) {
   return new StemEncoder(sampleRate, channels, (await OpusOggEncoder.supported(channels, bps)) ? bps : 0);
 }
 
+// Progress labels say where the model runs, since the CPU path is ~3-7x slower.
+const ON = { webgpu: 'on the GPU', wasm: 'on the CPU, slow' };
+let phaseLabel = '';
+
 let lastPct = -1;
 function report(progress, phase) {
   const pct = Math.floor(progress * 1000);
@@ -163,6 +167,7 @@ async function openSession(ort, role) {
     } catch (err) {
       if (h.backend !== 'webgpu') throw err;
       console.warn('WebGPU run failed, falling back to WASM:', err);
+      if (phaseLabel) report(lastPct / 1000, `${phaseLabel} (${ON.wasm}: WebGPU failed)`);
       await h.session.release().catch(() => {});
       h.session = await ort.InferenceSession.create(bytes, { executionProviders: ['wasm'], graphOptimizationLevel: 'all' });
       h.backend = 'wasm';
@@ -184,7 +189,8 @@ async function separate({ mix, sampleRate }) {
   const drums = [new Float32Array(n), new Float32Array(n)];
   const di = ex.manifest.stems.indexOf('drums');
   const backing = await makeEncoder(sampleRate, 2, BACKING_BPS);
-  report(0, 'Extracting drums');
+  phaseLabel = 'Extracting drums';
+  report(0, `${phaseLabel} (${ON[ex.backend]}${self.navigator.gpu ? '' : ': no WebGPU in workers here'})`);
   await demix(mix, ex.manifest, ex.run, {
     onOutput(pos, blocks) {
       const [l, r] = blocks[di];
@@ -214,7 +220,8 @@ async function separate({ mix, sampleRate }) {
   for (let i = 0; i < names.length; i++) {
     encoders.push(names[i] && names.indexOf(names[i]) === i ? await makeEncoder(sampleRate, 1, STEM_BPS) : null);
   }
-  report(0.5, 'Splitting drums');
+  phaseLabel = 'Splitting drums';
+  report(0.5, `${phaseLabel} (${ON[sp.backend]})`);
   await demix(drums, sp.manifest, sp.run, {
     onOutput(pos, blocks) {
       blocks.forEach(([l, r], s) => {
