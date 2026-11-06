@@ -267,13 +267,13 @@ def simplify(path):
 
 
 class Wrapper(torch.nn.Module):
-    def __init__(self, model, chunk):
+    def __init__(self, model, chunk, batch=1):
         super().__init__()
-        self.model, self.chunk = model, chunk
+        self.model, self.chunk, self.batch = model, chunk, batch
 
     def forward(self, mix):
         y = self.model(mix)
-        return y.reshape(1, -1, 2, self.chunk)
+        return y.reshape(self.batch, -1, 2, self.chunk)
 
 
 def stub_diffq():
@@ -350,8 +350,11 @@ def export(args):
     target = config.training.get('target_instrument')
 
     x = test_audio(args.audio, chunk, sr)
+    if args.batch > 1:
+        # Different content per batch item, so a mix-up between items shows.
+        x = torch.cat([x * (0.5 + 0.5 * i / args.batch) for i in range(args.batch)], 0)
     with torch.no_grad():
-        ref = model(x).reshape(1, -1, 2, chunk).numpy()
+        ref = model(x).reshape(args.batch, -1, 2, chunk).numpy()
     n_stems = ref.shape[1]
     stems = instruments if n_stems == len(instruments) else [target] if n_stems == 1 and target else None
     if not stems:
@@ -361,7 +364,7 @@ def export(args):
         raise SystemExit(f'--role drums needs a "drums" stem, model has {stems}')
 
     PATCHES[args.model_type](model, config)
-    wrapper = Wrapper(model, chunk).eval()
+    wrapper = Wrapper(model, chunk, args.batch).eval()
     with torch.no_grad():
         patched = wrapper(x).numpy()
     print(f'patched torch vs original: SDR {sdr(ref, patched):.1f} dB')
@@ -399,6 +402,7 @@ def export(args):
         'stems': stems,
         'normalize': normalize,
         'fp16': bool(args.fp16),
+        'batch': args.batch,
         'check': {'sdr': round(check, 1), 'audio': bool(args.audio)},
         'source': {'config': os.path.basename(args.config), 'checkpoint': os.path.basename(args.checkpoint)},
     }
@@ -443,6 +447,8 @@ def main():
     p.add_argument('--out', help='output path without extension')
     p.add_argument('--audio', help='optional audio file for the parity check (needs librosa)')
     p.add_argument('--fp16', action='store_true', help='store weights as float16 (half the size)')
+    p.add_argument('--batch', type=int, default=1,
+                   help='chunks per run (fixed). Experimental: for speed tests; the app needs batch 1')
     p.add_argument('--selftest', action='store_true')
     args = p.parse_args()
     if args.selftest:

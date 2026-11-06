@@ -37,6 +37,7 @@ export function validateManifest(m) {
   if (!ROLES[m.role]) bad(`unknown role "${m.role}"`);
   if (!(m.chunk > 0) || !(m.sampleRate > 0) || !(m.overlap >= 1)) bad('missing chunk / sampleRate / overlap');
   if (!Array.isArray(m.stems) || !m.stems.length) bad('no stems');
+  if ((m.batch ?? 1) !== 1) bad(`batched models (batch ${m.batch}) are for speed tests only; export with batch 1`);
   if (m.role === 'drums' && !m.stems.includes('drums')) bad('a drums extractor needs a "drums" stem');
   if (m.role === 'drumsep') {
     const have = new Set(m.stems.map(canonicalStem));
