@@ -35,7 +35,7 @@ if [ ! -x venv/bin/python ]; then
   "$PY" -m venv venv
 fi
 # Bump the marker name when the package list changes, so re-runs install it.
-if [ ! -f venv/.deps-ok-2 ]; then
+if [ ! -f venv/.deps-ok-3 ]; then
   echo "== python packages"
   venv/bin/pip install -q --upgrade pip
   # torch 2.8 still defaults to the TorchScript ONNX exporter export.py uses.
@@ -45,7 +45,10 @@ if [ ! -f venv/.deps-ok-2 ]; then
   # demucs 4.0.0 pins an old torchaudio, and openunmix (its Wiener filter)
   # would pull its own; only their model code is needed.
   venv/bin/pip install -q --no-deps "demucs==4.0.0" openunmix
-  touch venv/.deps-ok-2
+  # Graph simplifier (folds shape math); export.py falls back to
+  # onnxruntime's optimizer if it can't be installed.
+  venv/bin/pip install -q onnxsim || echo "onnxsim not installed; using onnxruntime's optimizer instead"
+  touch venv/.deps-ok-3
 fi
 
 if [ ! -d MSST/.git ]; then

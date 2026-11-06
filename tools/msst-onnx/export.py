@@ -225,6 +225,42 @@ PATCHES = {'mdx23c': patch_mdx23c, 'htdemucs': patch_htdemucs}
 
 # ---------------------------------------------------------------------------
 
+def op_counts(path):
+    import onnx
+    from collections import Counter
+    return Counter(n.op_type for n in onnx.load(path, load_external_data=False).graph.node)
+
+
+def simplify(path):
+    """Folds the shape arithmetic the tracer recorded (Shape -> Gather ->
+    Concat -> Reshape chains) into constants, using the fixed input size.
+    Besides trimming the graph, this matters for browsers: onnxruntime-web's
+    WebGPU Gather shader for those tiny integer tensors fails to compile in
+    Firefox (Metal)."""
+    before = op_counts(path)
+    try:
+        import onnx
+        import onnxsim
+        model, ok = onnxsim.simplify(onnx.load(path))
+        if not ok:
+            raise RuntimeError('onnxsim could not validate the simplified model')
+        onnx.save(model, path)
+        how = 'onnxsim'
+    except ImportError:
+        # Fallback: onnxruntime's basic (portable) graph optimizations,
+        # which include constant folding with static shapes.
+        import onnxruntime as ort
+        so = ort.SessionOptions()
+        so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_BASIC
+        so.optimized_model_filepath = path + '.opt'
+        ort.InferenceSession(path, so, providers=['CPUExecutionProvider'])
+        os.replace(path + '.opt', path)
+        how = 'onnxruntime basic optimizations'
+    after = op_counts(path)
+    print(f'simplified with {how}: {sum(before.values())} -> {sum(after.values())} nodes; '
+          f'Shape {before["Shape"]} -> {after["Shape"]}, Gather {before["Gather"]} -> {after["Gather"]}')
+
+
 class Wrapper(torch.nn.Module):
     def __init__(self, model, chunk):
         super().__init__()
@@ -331,6 +367,7 @@ def export(args):
         kw['dynamo'] = False
     torch.onnx.export(wrapper, (x,), onnx_path, opset_version=17,
                       input_names=['mix'], output_names=['stems'], do_constant_folding=True, **kw)
+    simplify(onnx_path)
 
     if args.fp16:
         import onnx
