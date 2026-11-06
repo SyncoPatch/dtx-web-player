@@ -139,7 +139,9 @@ async function renderPiece(ch) {
 }
 
 // Map<channel, stored path> of the kit, without rendering it.
+// The left bass drum (0x1C) reuses the bass drum sound.
 export const KIT_FILES = new Map([...PIECES].map(([ch, [file]]) => [ch, 'kit/' + file]));
+KIT_FILES.set(0x1C, KIT_FILES.get(0x13));
 
 let kit = null;
 

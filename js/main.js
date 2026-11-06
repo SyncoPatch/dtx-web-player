@@ -9,6 +9,7 @@ import { isGuitarProFile, convertGuitarPro } from './gp.js'; // alphaTab itself 
 import { writeDtx } from './dtxwrite.js';
 import { renderDrumKit, KIT_FILES } from './drumkit.js';
 import { buildTimedChart, barTimesForSync } from './gpsync.js';
+import { assignFeet, kickKey, pedalKey, DEFAULT_FEET, CH_BD, CH_LBD, CH_LP } from './feet.js';
 import { SoundBank } from './audio.js';
 
 const $ = (id) => document.getElementById(id);
@@ -49,6 +50,7 @@ const settings = {
   display: defaultDisplay(),
   hiddenLanes: [],
   skinId: null,
+  gpFeet: { kickSplit: true, hhClose: true }, // last choice in the GP import dialog
 };
 try {
   const saved = JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{}');
@@ -271,12 +273,28 @@ async function importEntries(fallbackTitle, totalSize, entries) {
 // so charts can be regenerated (e.g. re-timed to a recording) later.
 // audio: the attached recording; barTimes: an alignment's measure starts
 // (audio seconds); align: its summary; pins: [{ bar, time }] marked by ear.
-const NO_SYNC = { audio: null, kit: true, shiftMs: 0, barTimes: null, align: null, pins: [] };
+// feet: foot-assignment options (feet.js) plus per-chart note edits,
+// { [chartPath]: { [key]: action } }. Off unless chosen at import or in
+// Settings, so songs imported before this feature stay as they were.
+const NO_FEET = { ...DEFAULT_FEET, kickSplit: false, hhClose: false, edits: {} };
+const NO_SYNC = { audio: null, kit: true, shiftMs: 0, barTimes: null, align: null, pins: [], feet: NO_FEET };
 const NO_TIMING = { shiftMs: 0, barTimes: null, align: null, pins: [] };
+
+function feetOf(sync) {
+  return { ...NO_FEET, ...sync?.feet };
+}
+
+// The chart model with feet assigned, for one chart of a song.
+function footedModel(model, sync, path) {
+  const feet = feetOf(sync);
+  return assignFeet(model, feet, feet.edits[path] || {});
+}
 
 // DTX text for a Guitar Pro chart under a song's sync state: the score's own
 // timing with no recording, else timed to the recording placed as BGM.
-function gpChartText(model, sync = NO_SYNC) {
+// path: the chart's .dtx path, which keys its note edits.
+function gpChartText(source, sync, path) {
+  const model = footedModel(source, sync, path);
   const kitVolume = sync.kit === false ? 0 : 100;
   if (!sync.audio) return writeDtx(model, model.tempos, { wavs: KIT_FILES, kitVolume });
   const timed = buildTimedChart(model, barTimesForSync(model, sync));
@@ -289,7 +307,9 @@ function dtxBlob(text) {
   return new Blob(['﻿' + text], { type: 'text/plain' });
 }
 
-async function importGuitarPro(file) {
+// feetOpts: { kickSplit, hhClose } chosen in the import dialog.
+async function importGuitarPro(file, feetOpts = {}) {
+  const sync = { ...NO_SYNC, feet: { ...NO_FEET, ...feetOpts } };
   showOverlay(`Reading ${file.name}…`);
   const gp = await convertGuitarPro(new Uint8Array(await file.arrayBuffer()));
   showOverlay(`Importing ${file.name}…`);
@@ -302,7 +322,7 @@ async function importGuitarPro(file) {
   const warnings = [];
   gp.charts.forEach((chart, i) => {
     const stem = gp.charts.length > 1 ? `drums-${i + 1}` : 'drums';
-    files.push({ path: stem + '.dtx', origPath: stem + '.dtx', blob: dtxBlob(gpChartText(chart.model)) });
+    files.push({ path: stem + '.dtx', origPath: stem + '.dtx', blob: dtxBlob(gpChartText(chart.model, sync, stem + '.dtx')) });
     files.push({ path: stem + '.model.json', origPath: stem + '.model.json', blob: new Blob([JSON.stringify(chart.model)], { type: 'application/json' }) });
     dtxs.push({
       path: stem + '.dtx',
@@ -322,17 +342,41 @@ async function importGuitarPro(file) {
     addedAt: Date.now(),
     size: files.reduce((a, f) => a + f.blob.size, 0),
     source: 'guitarpro',
-    sync: { ...NO_SYNC },
+    sync,
   };
   await addSong(song, files);
   return warnings;
 }
 
+// Asks how to assign feet for the Guitar Pro files being imported.
+// Resolves to { kickSplit, hhClose }, or null when cancelled.
+function askGpImportOptions(names) {
+  const dlg = $('gp-import');
+  const kick = $('gp-kick-split');
+  const hh = $('gp-hh-close');
+  kick.checked = settings.gpFeet?.kickSplit !== false;
+  hh.checked = settings.gpFeet?.hhClose !== false;
+  $('gp-import-files').textContent = names.join(', ');
+  return new Promise((resolve) => {
+    dlg.onclose = () => {
+      if (dlg.returnValue !== 'ok') return resolve(null);
+      settings.gpFeet = { kickSplit: kick.checked, hhClose: hh.checked };
+      saveSettings();
+      resolve({ ...settings.gpFeet });
+    };
+    dlg.returnValue = '';
+    dlg.showModal();
+  });
+}
+
 async function importZipFiles(fileList) {
+  const gpNames = fileList.filter((f) => isGuitarProFile(f.name)).map((f) => f.name);
+  const gpOpts = gpNames.length ? await askGpImportOptions(gpNames) : null;
   for (const file of fileList) {
     if (isGuitarProFile(file.name)) {
+      if (!gpOpts) continue; // dialog cancelled
       try {
-        const warnings = await importGuitarPro(file);
+        const warnings = await importGuitarPro(file, gpOpts);
         if (warnings.length) alert(`Imported ${file.name} with warnings:\n\n${warnings.join('\n')}`);
       } catch (err) {
         console.error(err);
@@ -565,6 +609,7 @@ async function openChart(song, chartInfo, { fileMap = null, at = 0, autoplay = t
       player.onFrame = onPlayerFrame;
       player.onEnded = () => { el.btnPlay.textContent = 'Play'; };
       player.onLoopChange = updateLoopUI;
+      player.onChipEdit = editFoot;
       player.onTabZoom = (z) => { // pinch / ctrl+wheel zoom on the strip
         settings.tabZoom = Math.round(z * 100) / 100;
         saveSettings();
@@ -598,6 +643,7 @@ async function openChart(song, chartInfo, { fileMap = null, at = 0, autoplay = t
 
     currentDtx = dtx;
     current = { song, chartInfo, fileMap };
+    player.editFeet = editingFeet && song.source === 'guitarpro';
     currentMeta = {
       title: dtx.title || song.title,
       artist: dtx.artist,
@@ -927,7 +973,7 @@ el.seek.addEventListener('change', () => {
 
 // ---- shared setting setters (keep the bottom bar and the panel in sync) ----
 
-const steppers = { scroll: [], playSpeed: [], offsetGlobal: [], offsetChart: [], tabZoom: [], syncCoarse: [], syncFine: [] };
+const steppers = { scroll: [], playSpeed: [], offsetGlobal: [], offsetChart: [], tabZoom: [], syncCoarse: [], syncFine: [], feetRun: [] };
 const volEls = { volMaster: [], volBgm: [], volNotes: [] }; // range inputs
 
 function refreshSteppers(key) {
@@ -1037,6 +1083,12 @@ const STEPPER_DEFS = {
     min: -60000, max: 60000, step: 5, fmt: fmtMs,
     get: () => syncShiftValue(), apply: setSyncShift,
     enabled: () => !!currentSync()?.audio,
+  },
+  // Kicks at most this far apart form a run that alternates feet.
+  feetRun: {
+    min: 60, max: 250, step: 10, fmt: (v) => `${Math.round(v)} ms`,
+    get: () => feetRunValue(), apply: setFeetRun,
+    enabled: () => !!currentSync(),
   },
 };
 
@@ -1454,10 +1506,22 @@ let syncQueue = Promise.resolve();
 
 // Regenerates every chart of the open song for a new sync state, saves it,
 // and reloads the open chart at the same point of the recording.
+// patch: an object, or a (sync) => object | null function that runs in
+// queue order, so it sees every earlier change (null = nothing to do).
 function applySync(patch, { putFiles = [], deletePaths = [] } = {}) {
   syncQueue = syncQueue.then(async () => {
     if (!current || current.song.source !== 'guitarpro') return;
     const { song, chartInfo, fileMap } = current;
+    if (typeof patch === 'function') {
+      try {
+        patch = await patch({ ...NO_SYNC, ...song.sync });
+      } catch (err) {
+        console.error(err);
+        alert(err.message);
+        return;
+      }
+      if (!patch) return;
+    }
     const sync = { ...NO_SYNC, ...song.sync, ...patch };
     showOverlay('Updating chart…');
     try {
@@ -1466,7 +1530,7 @@ function applySync(patch, { putFiles = [], deletePaths = [] } = {}) {
       const charts = [];
       for (const d of song.dtxs) {
         const model = await loadModel(song, d.model, fileMap);
-        charts.push({ path: d.path, origPath: d.path, blob: dtxBlob(gpChartText(model, sync)) });
+        charts.push({ path: d.path, origPath: d.path, blob: dtxBlob(gpChartText(model, sync, d.path)) });
       }
       for (const f of charts) fileMap.set(f.path, f.blob);
       const updated = { ...song, sync, size: [...fileMap.values()].reduce((a, b) => a + b.size, 0) };
@@ -1669,6 +1733,7 @@ function updateAlignStatus() {
 }
 
 function buildSyncSection() {
+  buildFeetSection();
   const wrap = $('sync-opts');
   if (!wrap) return;
   wrap.replaceChildren();
@@ -1748,6 +1813,147 @@ function buildSyncSection() {
       row('Pins', pinActions).classList.add('sync-recording');
     }
   }
+}
+
+// ---- foot edits (Guitar Pro charts) ----
+
+let editingFeet = false; // session only: taps in the tab strip edit feet
+
+function setEditingFeet(on) {
+  editingFeet = on;
+  if (player) player.editFeet = on && current?.song.source === 'guitarpro';
+}
+
+// A tapped kick switches feet; a tapped hi-hat or pedal note toggles the
+// pedal at that point. Edits are stored only where they differ from what
+// the rules would do on their own.
+function editFoot(chip) {
+  if (chip.m == null || !current) return;
+  const path = current.chartInfo.path;
+  applySync((sync) => (current.chartInfo.path === path ? footEditPatch(chip, sync) : null));
+}
+
+async function footEditPatch(chip, sync) {
+  const { song, chartInfo, fileMap } = current;
+  const model = await loadModel(song, chartInfo.model, fileMap);
+  const lead = sync.audio ? buildTimedChart(model, barTimesForSync(model, sync)).leadBars : 0;
+  const bar = chip.m - lead;
+  if (!model.bars[bar]) return null;
+  const tick = Math.round(chip.pos * model.bars[bar].ticks);
+
+  const feet = feetOf(sync);
+  const edits = { ...(feet.edits[chartInfo.path] || {}) };
+  const notesAt = (m) => m.bars[bar].notes.filter((n) => n.tick === tick).map((n) => n.ch);
+  let key, want, auto;
+  if (chip.ch === CH_BD || chip.ch === CH_LBD) {
+    key = kickKey(bar, tick);
+    want = notesAt(assignFeet(model, feet, edits)).includes(CH_LBD) ? 'R' : 'L';
+    delete edits[key];
+    auto = notesAt(assignFeet(model, feet, edits)).includes(CH_LBD) ? 'L' : 'R';
+  } else {
+    key = pedalKey(bar, tick);
+    want = notesAt(assignFeet(model, feet, edits)).includes(CH_LP) ? '-' : '+';
+    delete edits[key];
+    auto = notesAt(assignFeet(model, feet, edits)).includes(CH_LP) ? '+' : '-';
+  }
+  if (want !== auto) edits[key] = want;
+  const all = { ...feet.edits, [chartInfo.path]: edits };
+  if (!Object.keys(edits).length) delete all[chartInfo.path];
+  return { feet: { ...feet, edits: all } };
+}
+
+function editCount(sync) {
+  return Object.keys(feetOf(sync).edits[current?.chartInfo.path] || {}).length;
+}
+
+// Run-limit clicks update the value at once; the chart regenerates after
+// the last one, like the sync shift.
+let pendingRun = null;
+let runTimer = null;
+
+function feetRunValue() {
+  return pendingRun ?? feetOf(currentSync()).runMs;
+}
+
+function setFeetRun(v) {
+  pendingRun = v;
+  refreshSteppers('feetRun');
+  clearTimeout(runTimer);
+  runTimer = setTimeout(() => {
+    const runMs = pendingRun;
+    applySync((s) => ({ feet: { ...feetOf(s), runMs } })).then(() => {
+      if (pendingRun === runMs) pendingRun = null;
+    });
+  }, 500);
+}
+
+function buildFeetSection() {
+  const wrap = $('feet-opts');
+  if (!wrap) return;
+  wrap.replaceChildren();
+  const sync = currentSync();
+  if (!sync) {
+    const p = document.createElement('p');
+    p.className = 'panel-note';
+    p.textContent = 'For charts imported from Guitar Pro files: split fast kick runs between both feet and add hi-hat pedal closes.';
+    wrap.append(p);
+    return;
+  }
+  const row = (text, ...nodes) => {
+    const r = document.createElement('span');
+    r.className = 'display-row';
+    r.append(text, ...nodes);
+    wrap.append(r);
+    return r;
+  };
+  const button = (text, onclick, title = '') => {
+    const b = document.createElement('button');
+    b.className = 'btn small';
+    b.textContent = text;
+    b.title = title;
+    b.onclick = onclick;
+    return b;
+  };
+  const feet = feetOf(sync);
+  const check = (text, key, title) => {
+    const input = document.createElement('input');
+    input.type = 'checkbox';
+    input.checked = !!feet[key];
+    input.onchange = () => {
+      const on = input.checked;
+      applySync((s) => ({ feet: { ...feetOf(s), [key]: on } }));
+    };
+    const label = document.createElement('label');
+    label.append(input, ' ', text);
+    label.title = title;
+    return label;
+  };
+  row('Kicks', check('Split fast runs between both feet', 'kickSplit',
+    'Kicks closer together than the run limit alternate right and left foot, by their place in the beat.'));
+  row('Run limit', makeStepper('feetRun').el).title = 'Kicks at most this far apart count as one run.';
+  row('Hi-hat', check('Close with the pedal', 'hhClose',
+    'Adds a hi-hat pedal note where a closed hit follows an open hi-hat.'));
+
+  const edit = document.createElement('input');
+  edit.type = 'checkbox';
+  edit.checked = editingFeet;
+  edit.onchange = () => setEditingFeet(edit.checked);
+  const editLabel = document.createElement('label');
+  editLabel.append(edit, ' Edit in the tab strip');
+  editLabel.title = 'While paused, tap a kick in the tab strip to switch feet, or a hi-hat note to add or remove the pedal. Needs the tab strip on.';
+  const actions = document.createElement('span');
+  actions.append(editLabel);
+  const n = editCount(sync);
+  if (n) {
+    const path = current.chartInfo.path;
+    actions.append(button(`Reset ${n} edit${n > 1 ? 's' : ''}`, () => applySync((s) => {
+      const f = feetOf(s);
+      const edits = { ...f.edits };
+      delete edits[path];
+      return { feet: { ...f, edits } };
+    }), 'Forget the note edits on this chart.'));
+  }
+  row('Edits', actions).classList.add('sync-recording');
 }
 
 function openSettingsPanel() {

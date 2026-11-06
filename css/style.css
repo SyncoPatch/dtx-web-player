@@ -213,15 +213,15 @@ button, input, select { touch-action: manipulation; }
   display: flex; align-items: center; gap: 4px;
   font-size: 12px; color: var(--dim); cursor: pointer;
 }
-#display-opts, #playback-opts, #sync-opts {
+#display-opts, #playback-opts, #sync-opts, #feet-opts {
   display: flex; flex-direction: column; gap: 7px; min-width: 210px;
 }
-#sync-opts { max-width: 280px; }
-#sync-opts .display-row > :last-child { margin-left: auto; }
-#sync-opts .panel-note { margin: 0; font-size: 12px; color: var(--dim); line-height: 1.4; }
-#sync-opts .sync-recording { cursor: default; }
+#sync-opts, #feet-opts { max-width: 280px; }
+#sync-opts .display-row > :last-child, #feet-opts .display-row > :last-child { margin-left: auto; }
+#sync-opts .panel-note, #feet-opts .panel-note { margin: 0; font-size: 12px; color: var(--dim); line-height: 1.4; }
+#sync-opts .sync-recording, #feet-opts .sync-recording { cursor: default; }
 #sync-opts .sync-file { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; flex: 1; }
-#sync-opts .sync-recording > :last-child { display: flex; gap: 4px; flex-shrink: 0; }
+#sync-opts .sync-recording > :last-child, #feet-opts .sync-recording > :last-child { display: flex; gap: 4px; flex-shrink: 0; }
 #sync-opts .sync-status { font-size: 12px; color: var(--dim); line-height: 1.4; }
 .panel-box .display-row {
   display: flex; align-items: center; gap: 8px;
@@ -283,6 +283,14 @@ input[type="color"] {
   background: none; cursor: pointer;
 }
 .panel-foot { margin-top: 14px; display: flex; justify-content: flex-end; }
+
+#gp-import { color: var(--text); margin: auto; width: min(380px, 95vw); }
+#gp-import::backdrop { background: rgba(8, 8, 14, 0.6); }
+#gp-import h2 { font-size: 16px; margin-bottom: 6px; }
+#gp-import form { display: flex; flex-direction: column; gap: 8px; }
+#gp-import .gp-import-files { font-size: 12px; color: var(--dim); overflow-wrap: anywhere; }
+#gp-import .panel-note { font-size: 12px; color: var(--dim); }
+#gp-import .panel-foot { gap: 8px; }
 
 input[type="range"] { accent-color: var(--accent); }
 
