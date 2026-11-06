@@ -73,9 +73,12 @@ class ConvSTFT(torch.nn.Module):
         inv = inv * win
         if normalized:
             inv = inv * math.sqrt(n_fft)
-        self.register_buffer('fwd', fwd.float()[:, None, :], persistent=False)
-        self.register_buffer('inv', inv.float()[:, None, :], persistent=False)
-        self.register_buffer('win2', (win ** 2).float()[None, None, :], persistent=False)
+        # Persistent buffers of a registered submodule become ONNX initializers
+        # with known shapes; the exporter rejects convolutions whose kernel
+        # shape it can't see.
+        self.register_buffer('fwd', fwd.float()[:, None, :])
+        self.register_buffer('inv', inv.float()[:, None, :])
+        self.register_buffer('win2', (win ** 2).float()[None, None, :])
 
     def forward(self, x):
         """x: (..., time) -> (..., 2, freq, frames)."""
@@ -141,6 +144,7 @@ class MDXRealSTFT:
 def patch_mdx23c(model, config):
     a = config.audio
     model.stft = MDXRealSTFT(a.n_fft, a.hop_length, a.dim_f)
+    model.add_module('real_stft', model.stft.conv)  # see ConvSTFT buffers
 
 
 def patch_htdemucs(model, config):
@@ -148,7 +152,11 @@ def patch_htdemucs(model, config):
     for name in ('spectro', 'ispectro'):
         if not hasattr(mod, name):
             raise SystemExit(f'{mod.__name__} has no {name}(); this MSST version is not supported')
-    stfts = {}
+    # Registered on the model up front (see ConvSTFT buffers); other sizes
+    # would be created on demand but HTDemucs only uses its own nfft / hop.
+    main = ConvSTFT(model.nfft, model.hop_length, normalized=True)
+    model.add_module('real_stft', main)
+    stfts = {(model.nfft, model.hop_length): main}
 
     def get(n_fft, hop, device):
         key = (n_fft, hop)
