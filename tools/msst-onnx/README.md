@@ -15,13 +15,27 @@ Convert them once on your computer with `export.py`, then import the
 `.onnx` + `.json` pairs in **Settings → Drum separation models**. The app keeps
 them in the browser's private storage (OPFS), so this happens once per browser.
 
+## Quick way: one script
+
+```sh
+sh tools/msst-onnx/export-recommended.sh   # does steps 1-3 below; output in ~/Documents/msst-onnx/out/
+```
+
+Then continue with step 4. The steps below are the same thing by hand.
+
 ## 1. Set up (once)
+
+Use Python 3.10–3.13, because torch has no wheels for newer versions yet.
+**Don't** `pip install -r` MSST's `requirements.txt`: it includes GUI and
+microphone packages (`wxpython`, `pyaudio`) that fail to build on macOS, and
+the export doesn't need them.
 
 ```sh
 git clone https://github.com/ZFTurbo/Music-Source-Separation-Training ~/src/MSST
-python3 -m venv ~/msst-venv && source ~/msst-venv/bin/activate
-pip install -r ~/src/MSST/requirements.txt   # or at least: torch demucs ml_collections omegaconf einops librosa
-pip install onnx onnxruntime                   # + onnxconverter-common for --fp16
+python3.10 -m venv ~/msst-venv && source ~/msst-venv/bin/activate
+pip install "torch==2.8.0" "numpy<2.3" ml_collections omegaconf pyyaml einops julius dora-search \
+  librosa soundfile onnx onnxruntime onnxconverter-common beartype rotary_embedding_torch
+pip install --no-deps "demucs==4.0.0"   # its pinned torchaudio is not needed
 
 python export.py --selftest   # checks the STFT replacement against torch (no MSST needed)
 ```
