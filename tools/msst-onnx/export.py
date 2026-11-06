@@ -167,26 +167,27 @@ def patch_htdemucs(model, config):
     for name in ('spectro', 'ispectro'):
         if not hasattr(mod, name):
             raise SystemExit(f'{mod.__name__} has no {name}(); this MSST version is not supported')
-    # Registered on the model up front (see ConvSTFT buffers); other sizes
-    # would be created on demand but HTDemucs only uses its own nfft / hop.
-    main = ConvSTFT(model.nfft, model.hop_length, normalized=True)
+    # One STFT, built before tracing and registered on the model. It must
+    # never be built during the trace: its DFT tables would be recorded as
+    # graph ops. Sizes come from plain ints, never from tensor shapes, which
+    # are traced values during ONNX export.
+    nfft, hop = int(model.nfft), int(model.hop_length)
+    main = ConvSTFT(nfft, hop, normalized=True)
     model.add_module('real_stft', main)
-    stfts = {(model.nfft, model.hop_length): main}
 
-    def get(n_fft, hop, device):
-        key = (n_fft, hop)
-        if key not in stfts:
-            stfts[key] = ConvSTFT(n_fft, hop, normalized=True).to(device)
-        return stfts[key]
+    def get(n_fft, hop_length):
+        if (int(n_fft), int(hop_length)) != (nfft, hop):
+            raise SystemExit(f'unexpected STFT size {n_fft}/{hop_length} (model uses {nfft}/{hop})')
+        return main
 
     def spectro(x, n_fft=512, hop_length=None, pad=0):
         assert pad == 0
-        return get(n_fft, hop_length or n_fft // 4, x.device)(x)
+        return get(n_fft, hop_length or n_fft // 4)(x)
 
     def ispectro(z, hop_length=None, length=None, pad=0):
         assert pad == 0
-        n_fft = 2 * (z.shape[-2] - 1)
-        return get(n_fft, hop_length or n_fft // 4, z.device).inverse(z, length)
+        # HTDemucs always uses hop = nfft / 4 (asserted in its _spec).
+        return get(4 * hop_length, hop_length).inverse(z, length)
 
     def _magnitude(self, z):
         if not self.cac:
