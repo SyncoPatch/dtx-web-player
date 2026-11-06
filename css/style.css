@@ -87,6 +87,11 @@ button, input, select { touch-action: manipulation; }
   font-size: 16px; font-weight: 700; flex: 1;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
+.song-card .song-info {
+  font-size: 13px; color: var(--text); opacity: 0.85;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.song-card .song-info[hidden] { display: none; }
 .song-card .song-meta { font-size: 12px; color: var(--dim); }
 .song-card .charts { display: flex; flex-wrap: wrap; gap: 6px; }
 
@@ -213,9 +218,17 @@ button, input, select { touch-action: manipulation; }
   display: flex; align-items: center; gap: 4px;
   font-size: 12px; color: var(--dim); cursor: pointer;
 }
-#display-opts, #playback-opts {
+#display-opts, #playback-opts, #sync-opts, #feet-opts {
   display: flex; flex-direction: column; gap: 7px; min-width: 210px;
 }
+#sync-opts, #feet-opts, #model-opts { max-width: 280px; }
+#sync-opts .display-row > :last-child, #feet-opts .display-row > :last-child, #model-opts .display-row > :last-child { margin-left: auto; }
+#model-opts p.panel-note { margin-top: 4px; }
+#sync-opts .panel-note, #feet-opts .panel-note, #model-opts .panel-note { margin: 0; font-size: 12px; color: var(--dim); line-height: 1.4; }
+#sync-opts .sync-recording, #feet-opts .sync-recording, #model-opts .sync-recording { cursor: default; }
+#sync-opts .sync-file, #model-opts .sync-file { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; flex: 1; }
+#sync-opts .sync-recording > :last-child, #feet-opts .sync-recording > :last-child, #model-opts .sync-recording > :last-child { display: flex; gap: 4px; flex-shrink: 0; }
+#sync-opts .sync-status { font-size: 12px; color: var(--dim); line-height: 1.4; }
 .panel-box .display-row {
   display: flex; align-items: center; gap: 8px;
   font-size: 13px; cursor: pointer;
@@ -262,10 +275,17 @@ button, input, select { touch-action: manipulation; }
 .stepper button:hover:not(:disabled) { background: #2d3d5a; border-color: var(--accent); }
 .stepper button:disabled { opacity: 0.3; cursor: default; }
 .stepper .stepper-val {
-  min-width: 50px; text-align: center;
-  font-size: 13px; font-variant-numeric: tabular-nums;
+  width: 64px; min-width: 50px; text-align: center;
+  font: inherit; font-size: 13px; font-variant-numeric: tabular-nums;
   color: var(--text);
+  background: transparent;
+  border: 1px solid transparent; border-radius: 4px;
+  padding: 1px 2px;
+  cursor: text;
 }
+.stepper .stepper-val:hover:not(:disabled) { border-color: var(--border); }
+.stepper .stepper-val:focus { outline: none; border-color: var(--accent); background: var(--panel2); }
+.stepper .stepper-val:disabled { cursor: default; }
 #note-colors { display: grid; grid-template-columns: repeat(2, auto); gap: 6px 20px; }
 #note-colors label { display: flex; align-items: center; gap: 8px; font-size: 13px; cursor: pointer; }
 #note-colors .type-tag { font-weight: 700; width: 32px; }
@@ -276,6 +296,14 @@ input[type="color"] {
   background: none; cursor: pointer;
 }
 .panel-foot { margin-top: 14px; display: flex; justify-content: flex-end; }
+
+#gp-import { color: var(--text); margin: auto; width: min(380px, 95vw); }
+#gp-import::backdrop { background: rgba(8, 8, 14, 0.6); }
+#gp-import h2 { font-size: 16px; margin-bottom: 6px; }
+#gp-import form { display: flex; flex-direction: column; gap: 8px; }
+#gp-import .gp-import-files { font-size: 12px; color: var(--dim); overflow-wrap: anywhere; }
+#gp-import .panel-note { font-size: 12px; color: var(--dim); }
+#gp-import .panel-foot { gap: 8px; }
 
 input[type="range"] { accent-color: var(--accent); }
 
@@ -337,7 +365,7 @@ input[type="range"] { accent-color: var(--accent); }
   .btn { padding: 11px 16px; font-size: 15px; }
   .btn.small { padding: 8px 12px; font-size: 14px; }
   .stepper button { width: 38px; height: 34px; font-size: 17px; }
-  .stepper .stepper-val { min-width: 56px; font-size: 14px; }
+  .stepper .stepper-val { width: 72px; min-width: 56px; font-size: 16px; } /* 16px: no iOS focus zoom */
   .chart-btn { padding: 10px 14px; font-size: 15px; }
   #controls input[type="range"] { height: 30px; }
   .slider-label input[type="range"] { width: 110px; }

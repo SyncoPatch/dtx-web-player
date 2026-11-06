@@ -154,7 +154,7 @@ export function parseDTX(text, { headersOnly = false } = {}) {
         const bpm = bpmDefs.get(v);
         if (bpm) events.push({ beat, kind: 0, bpm });
       } else if (isSoundChannel(o.ch)) {
-        events.push({ beat, kind: 3, ch: o.ch, wav: v });
+        events.push({ beat, kind: 3, ch: o.ch, wav: v, m: o.measure, pos: i / n });
       }
     }
   }
@@ -174,7 +174,7 @@ export function parseDTX(text, { headersOnly = false } = {}) {
       dtx.beats.push({ time });
     } else {
       const visible = e.ch >= DRUM_CH_MIN && e.ch <= DRUM_CH_MAX;
-      dtx.chips.push({ time, ch: e.ch, wav: e.wav, visible });
+      dtx.chips.push({ time, ch: e.ch, wav: e.wav, visible, m: e.m, pos: e.pos });
       if (time > dtx.chartEnd) dtx.chartEnd = time;
     }
   }

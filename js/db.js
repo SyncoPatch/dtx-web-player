@@ -1,6 +1,7 @@
 // IndexedDB persistence for imported songs and skins.
 //
-// Store "songs": { id, title, dtxs: [{ path, title, label, level, bpm }], addedAt, size }
+// Store "songs": { id, title, dtxs: [{ path, title, label, level, bpm, model? }], addedAt, size,
+//                  source?: 'guitarpro', sync?: { audio, kit, shiftMs, barTimes } }
 // Store "files": { songId, path (normalized lowercase), origPath, blob }
 // Store "skins": { id, name, addedAt, size, fileCount }
 // Store "skinFiles": { skinId, name (lowercased basename), blob }
@@ -58,6 +59,21 @@ export async function addSong(song, files) {
   tx.objectStore('songs').put(song);
   const fs = tx.objectStore('files');
   for (const f of files) fs.put({ songId: song.id, ...f });
+  return new Promise((resolve, reject) => {
+    tx.oncomplete = resolve;
+    tx.onerror = () => reject(tx.error);
+    tx.onabort = () => reject(tx.error);
+  });
+}
+
+// Replace a song record and change some of its files in one transaction.
+export async function updateSong(song, putFiles = [], deletePaths = []) {
+  const db = await openDB();
+  const tx = db.transaction(['songs', 'files'], 'readwrite');
+  tx.objectStore('songs').put(song);
+  const fs = tx.objectStore('files');
+  for (const path of deletePaths) fs.delete([song.id, path]);
+  for (const f of putFiles) fs.put({ songId: song.id, ...f });
   return new Promise((resolve, reject) => {
     tx.oncomplete = resolve;
     tx.onerror = () => reject(tx.error);

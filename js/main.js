@@ -1,10 +1,18 @@
 // App wiring: import (ZIP / folder), persisted song list, playback screen.
 
 import { extractZip } from './zip.js';
+import { createZip } from './zipwrite.js';
 import { parseDTX, parseSetDef, decodeText } from './dtx.js';
-import { listSongs, addSong, deleteSong, getSongFiles, listSkins, addSkin, deleteSkin } from './db.js';
+import { listSongs, addSong, updateSong, deleteSong, getSongFiles, listSkins, addSkin, deleteSkin } from './db.js';
 import { Player, NOTE_TYPES, LANE_IDS, GROUP_RULES, defaultColors, defaultDisplay } from './player.js';
 import { Skin, collectSkinFiles } from './skin.js';
+import { isGuitarProFile, convertGuitarPro } from './gp.js'; // alphaTab itself loads lazily
+import { writeDtx } from './dtxwrite.js';
+import { renderDrumKit, KIT_FILES } from './drumkit.js';
+import { buildTimedChart, barTimesForSync } from './gpsync.js';
+import { assignFeet, kickKey, pedalKey, DEFAULT_FEET, CH_BD, CH_LBD, CH_LP } from './feet.js';
+import { SoundBank } from './audio.js';
+import { ROLES, listModels, removeModel, installFromFiles, installFromUrl, opfsAvailable } from './models.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -30,6 +38,7 @@ let player = null;
 let seeking = false;
 let currentDtx = null;   // parsed chart of the open song (for PDF export)
 let currentMeta = null;  // { title, artist, bpm, level, label }
+let current = null;      // { song, chartInfo, fileMap } of the open chart
 
 // ---- persisted playback settings ----
 
@@ -43,6 +52,7 @@ const settings = {
   display: defaultDisplay(),
   hiddenLanes: [],
   skinId: null,
+  gpFeet: { kickSplit: true, hhClose: true }, // last choice in the GP import dialog
 };
 try {
   const saved = JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{}');
@@ -218,7 +228,7 @@ async function importEntries(fallbackTitle, totalSize, entries) {
   // Read chart headers for titles/levels.
   const dtxs = [];
   for (const f of dtxFiles) {
-    let h = { title: '', level: null, bpm: null };
+    let h = { title: '', artist: '', level: null, bpm: null };
     try {
       h = parseDTX(decodeText(await f.blob.arrayBuffer()), { headersOnly: true });
     } catch { /* keep placeholder */ }
@@ -228,6 +238,7 @@ async function importEntries(fallbackTitle, totalSize, entries) {
       label: '',
       level: h.level,
       bpm: h.bpm,
+      artist: h.artist,
     });
   }
 
@@ -248,10 +259,13 @@ async function importEntries(fallbackTitle, totalSize, entries) {
   }
 
   dtxs.sort((a, b) => (a.level ?? 999) - (b.level ?? 999));
+  const artist = dtxs.find((d) => d.artist)?.artist || '';
+  for (const d of dtxs) delete d.artist;
 
   const song = {
     id: crypto.randomUUID(),
     title: songTitle || dtxs[0].title || fallbackTitle,
+    artist,
     dtxs,
     addedAt: Date.now(),
     size: totalSize,
@@ -260,8 +274,132 @@ async function importEntries(fallbackTitle, totalSize, entries) {
   return song;
 }
 
+// Guitar Pro: each drum track becomes a generated .dtx chart played with a
+// synthesized kit. The original file and a beat-domain model are stored too,
+// so charts can be regenerated (e.g. re-timed to a recording) later.
+// audio: the attached recording; barTimes: an alignment's measure starts
+// (audio seconds); align: its summary; pins: [{ bar, time }] marked by ear.
+// stems: drum separation of the recording (separate.js), or null:
+// { files: { nodrums, kick, snare, … }: stored paths, models, backend, at, use }.
+// With use on, the drumless backing plays as BGM and every drum note plays
+// its own hit sliced from the stems (stemslice.js).
+// feet: foot-assignment options (feet.js) plus per-chart note edits,
+// { [chartPath]: { [key]: action } }. Off unless chosen at import or in
+// Settings, so songs imported before this feature stay as they were.
+const NO_FEET = { ...DEFAULT_FEET, kickSplit: false, hhClose: false, edits: {} };
+const NO_SYNC = { audio: null, kit: true, shiftMs: 0, barTimes: null, align: null, pins: [], feet: NO_FEET, stems: null };
+const NO_TIMING = { shiftMs: 0, barTimes: null, align: null, pins: [] };
+
+function feetOf(sync) {
+  return { ...NO_FEET, ...sync?.feet };
+}
+
+// The chart model with feet assigned, for one chart of a song.
+function footedModel(model, sync, path) {
+  const feet = feetOf(sync);
+  return assignFeet(model, feet, feet.edits[path] || {});
+}
+
+// DTX text for a Guitar Pro chart under a song's sync state: the score's own
+// timing with no recording, else timed to the recording placed as BGM.
+// path: the chart's .dtx path, which keys its note edits.
+function gpChartText(source, sync, path) {
+  const model = footedModel(source, sync, path);
+  const kitVolume = sync.kit === false ? 0 : 100;
+  if (!sync.audio) return writeDtx(model, model.tempos, { wavs: KIT_FILES, kitVolume });
+  const timed = buildTimedChart(model, barTimesForSync(model, sync));
+  const bgm = stemsInUse(sync) ? sync.stems.files.nodrums : sync.audio.path;
+  return writeDtx(timed.model, timed.tempos, {
+    wavs: KIT_FILES, kitVolume, bgm: { file: bgm, ...timed.bgm },
+  });
+}
+
+function stemsInUse(sync) {
+  return !!(sync?.audio && sync.stems?.use && sync.stems.files?.nodrums);
+}
+
+function dtxBlob(text) {
+  return new Blob(['﻿' + text], { type: 'text/plain' });
+}
+
+// feetOpts: { kickSplit, hhClose } chosen in the import dialog.
+async function importGuitarPro(file, feetOpts = {}) {
+  const sync = { ...NO_SYNC, feet: { ...NO_FEET, ...feetOpts } };
+  showOverlay(`Reading ${file.name}…`);
+  const gp = await convertGuitarPro(new Uint8Array(await file.arrayBuffer()));
+  showOverlay(`Importing ${file.name}…`);
+  const kit = await renderDrumKit();
+
+  const files = [{ path: normPath('source/' + basename(file.name)), origPath: file.name, blob: file }];
+  for (const k of kit.values()) files.push({ path: k.file, origPath: k.file, blob: k.blob });
+
+  const dtxs = [];
+  const warnings = [];
+  gp.charts.forEach((chart, i) => {
+    const stem = gp.charts.length > 1 ? `drums-${i + 1}` : 'drums';
+    files.push({ path: stem + '.dtx', origPath: stem + '.dtx', blob: dtxBlob(gpChartText(chart.model, sync, stem + '.dtx')) });
+    files.push({ path: stem + '.model.json', origPath: stem + '.model.json', blob: new Blob([JSON.stringify(chart.model)], { type: 'application/json' }) });
+    dtxs.push({
+      path: stem + '.dtx',
+      title: chart.model.title || stem,
+      label: chart.name,
+      level: null,
+      bpm: Math.round(chart.model.tempos[0].bpm * 100) / 100,
+      model: stem + '.model.json',
+    });
+    for (const w of chart.warnings) warnings.push(gp.charts.length > 1 ? `${chart.name}: ${w}` : w);
+  });
+
+  const song = {
+    id: crypto.randomUUID(),
+    title: gp.title || file.name.replace(/\.[^.]+$/, ''),
+    artist: gp.artist || '',
+    dtxs,
+    addedAt: Date.now(),
+    size: files.reduce((a, f) => a + f.blob.size, 0),
+    source: 'guitarpro',
+    sync,
+  };
+  await addSong(song, files);
+  return warnings;
+}
+
+// Asks how to assign feet for the Guitar Pro files being imported.
+// Resolves to { kickSplit, hhClose }, or null when cancelled.
+function askGpImportOptions(names) {
+  const dlg = $('gp-import');
+  const kick = $('gp-kick-split');
+  const hh = $('gp-hh-close');
+  kick.checked = settings.gpFeet?.kickSplit !== false;
+  hh.checked = settings.gpFeet?.hhClose !== false;
+  $('gp-import-files').textContent = names.join(', ');
+  return new Promise((resolve) => {
+    dlg.onclose = () => {
+      if (dlg.returnValue !== 'ok') return resolve(null);
+      settings.gpFeet = { kickSplit: kick.checked, hhClose: hh.checked };
+      saveSettings();
+      resolve({ ...settings.gpFeet });
+    };
+    dlg.returnValue = '';
+    dlg.showModal();
+  });
+}
+
 async function importZipFiles(fileList) {
+  const gpNames = fileList.filter((f) => isGuitarProFile(f.name)).map((f) => f.name);
+  const gpOpts = gpNames.length ? await askGpImportOptions(gpNames) : null;
   for (const file of fileList) {
+    if (isGuitarProFile(file.name)) {
+      if (!gpOpts) continue; // dialog cancelled
+      try {
+        const warnings = await importGuitarPro(file, gpOpts);
+        if (warnings.length) alert(`Imported ${file.name} with warnings:\n\n${warnings.join('\n')}`);
+      } catch (err) {
+        console.error(err);
+        alert(`Failed to import ${file.name}:\n${err.message}`);
+      }
+      continue;
+    }
     try {
       showOverlay(`Extracting ${file.name}…`);
       const entries = await extractZip(await file.arrayBuffer());
@@ -354,6 +492,7 @@ async function importFolder(fileList) {
 
 async function renderSongList() {
   const songs = await listSongs();
+  const needArtist = [];
   el.songList.replaceChildren();
   el.emptyHint.hidden = songs.length > 0;
 
@@ -387,9 +526,17 @@ async function renderSongList() {
     };
     head.append(title, menuBtn, del);
 
+    const info = document.createElement('div');
+    info.className = 'song-info';
+    info.textContent = songInfoText(song);
+    info.title = info.textContent;
+    info.hidden = !info.textContent;
+    if (song.artist === undefined) needArtist.push([song, info]);
+
     const meta = document.createElement('div');
     meta.className = 'song-meta';
-    meta.textContent = `${song.dtxs.length} chart${song.dtxs.length > 1 ? 's' : ''} · ${fmtSize(song.size)} · added ${new Date(song.addedAt).toLocaleDateString()}`;
+    const kind = song.source === 'guitarpro' ? (song.sync?.audio ? 'Guitar Pro + recording · ' : 'Guitar Pro · ') : '';
+    meta.textContent = `${kind}${song.dtxs.length} chart${song.dtxs.length > 1 ? 's' : ''} · ${fmtSize(song.size)} · added ${new Date(song.addedAt).toLocaleDateString()}`;
 
     const charts = document.createElement('div');
     charts.className = 'charts';
@@ -410,8 +557,43 @@ async function renderSongList() {
       charts.append(btn);
     }
 
-    li.append(head, meta, charts);
+    li.append(head, info, meta, charts);
     el.songList.append(li);
+  }
+  backfillArtists(needArtist);
+}
+
+const fmtBpm = (b) => String(Math.round(b * 100) / 100);
+
+// "Artist · BPM 140" (or a range when the charts disagree).
+function songInfoText(song) {
+  const bits = [];
+  if (song.artist) bits.push(song.artist);
+  const bpms = song.dtxs.map((d) => d.bpm).filter((b) => Number.isFinite(b) && b > 0);
+  if (bpms.length) {
+    const lo = Math.min(...bpms), hi = Math.max(...bpms);
+    bits.push(Math.abs(hi - lo) < 0.005 ? `BPM ${fmtBpm(lo)}` : `BPM ${fmtBpm(lo)}–${fmtBpm(hi)}`);
+  }
+  return bits.join(' · ');
+}
+
+// Songs imported before artists were stored: read it from the first chart's
+// header once, save it, and fill the card in place.
+async function backfillArtists(list) {
+  for (const [song, info] of list) {
+    try {
+      const files = await getSongFiles(song.id);
+      const blob = files.find((f) => f.path === song.dtxs[0]?.path)?.blob;
+      let artist = '';
+      if (blob) artist = parseDTX(decodeText(await blob.arrayBuffer()), { headersOnly: true }).artist || '';
+      song.artist = artist;
+      await updateSong(song);
+      info.textContent = songInfoText(song);
+      info.title = info.textContent;
+      info.hidden = !info.textContent;
+    } catch (err) {
+      console.warn('artist backfill failed', song.id, err);
+    }
   }
 }
 
@@ -431,6 +613,17 @@ function showCardMenu(btn, song) {
   const menu = document.createElement('div');
   menu.className = 'card-menu';
   menu.dataset.songId = song.id;
+  const zipItem = document.createElement('button');
+  zipItem.className = 'card-menu-item';
+  zipItem.textContent = 'Export ZIP';
+  zipItem.title = song.source === 'guitarpro'
+    ? 'Download the generated DTX charts with their sounds, recording and the original Guitar Pro file'
+    : 'Download this song as a DTX package';
+  zipItem.onclick = () => {
+    closeCardMenu();
+    exportSongZip(song);
+  };
+  menu.append(zipItem);
   for (const d of song.dtxs) {
     const name = d.label || d.title || basename(d.path);
     const view = document.createElement('button');
@@ -457,6 +650,42 @@ function showCardMenu(btn, song) {
   openMenu = menu;
 }
 
+const safeFileName = (s, fallback) => (s || '').replace(/[\\/:*?"<>|]+/g, '_').trim().slice(0, 120) || fallback;
+
+function downloadBlob(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.append(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 30000);
+}
+
+// The song's stored files under one top folder, re-importable via Import ZIP.
+async function exportSongZip(song) {
+  try {
+    showOverlay('Building ZIP…');
+    const folder = safeFileName(song.title, 'song');
+    const files = await getSongFiles(song.id);
+    if (!files.length) throw new Error('No files stored for this song.');
+    // Generated Guitar Pro charts reference the stored paths (a recording's
+    // origPath is the user's file name), so use those; DTX packages keep
+    // their original names and case.
+    const gp = song.source === 'guitarpro';
+    const blob = await createZip(files.map((f) => ({
+      name: `${folder}/${((gp ? f.path : f.origPath) || f.path).replace(/^\/+/, '')}`,
+      blob: f.blob,
+    })));
+    downloadBlob(blob, `${folder}.zip`);
+  } catch (err) {
+    console.error(err);
+    alert(`Failed to export ZIP:\n${err.message}`);
+  }
+  hideOverlay();
+}
+
 document.addEventListener('pointerdown', (e) => {
   if (openMenu && !openMenu.contains(e.target) && !e.target.closest?.('.card-menu-btn')) {
     closeCardMenu();
@@ -465,11 +694,15 @@ document.addEventListener('pointerdown', (e) => {
 
 // ---- playback ----
 
-async function openChart(song, chartInfo) {
+// opts.fileMap reuses already-loaded files (and so their decoded audio);
+// opts.at starts at that song time; opts.autoplay = false stays paused.
+async function openChart(song, chartInfo, { fileMap = null, at = 0, autoplay = true } = {}) {
   try {
     showOverlay('Loading files…');
-    const stored = await getSongFiles(song.id);
-    const fileMap = new Map(stored.map((f) => [f.path, f.blob]));
+    if (!fileMap) {
+      const stored = await getSongFiles(song.id);
+      fileMap = new Map(stored.map((f) => [f.path, f.blob]));
+    }
 
     const dtxBlob = fileMap.get(chartInfo.path);
     if (!dtxBlob) throw new Error('Chart file missing from local storage. Try re-importing the song.');
@@ -482,6 +715,7 @@ async function openChart(song, chartInfo) {
       player.onFrame = onPlayerFrame;
       player.onEnded = () => { el.btnPlay.textContent = 'Play'; };
       player.onLoopChange = updateLoopUI;
+      player.onChipEdit = editFoot;
       player.onTabZoom = (z) => { // pinch / ctrl+wheel zoom on the strip
         settings.tabZoom = Math.round(z * 100) / 100;
         saveSettings();
@@ -498,25 +732,29 @@ async function openChart(song, chartInfo) {
     applyOffset();
     refreshSteppers('offsetChart');
 
+    const shownBpm = await gpDisplayInfo(song, chartInfo, fileMap, dtx);
     const resolve = makeResolver(fileMap, dirname(chartInfo.path));
     const { missing, failed } = await player.load(dtx, resolve, (done, total) => {
       el.overlayText.textContent = `Decoding audio ${done} / ${total}…`;
     });
+    await loadStemKeysounds(song, fileMap, dtx, missing, failed);
 
     el.npTitle.textContent = dtx.title || song.title;
     const sub = [];
     if (dtx.artist) sub.push(dtx.artist);
-    sub.push(`BPM ${dtx.bpm}`);
+    sub.push(`BPM ${shownBpm}`);
     if (chartInfo.label) sub.push(chartInfo.label);
     const lvl = fmtLevel(dtx.level);
     if (lvl) sub.push(`Lv ${lvl}`);
     el.npSub.textContent = sub.join(' · ');
 
     currentDtx = dtx;
+    current = { song, chartInfo, fileMap };
+    player.editFeet = editingFeet && song.source === 'guitarpro';
     currentMeta = {
       title: dtx.title || song.title,
       artist: dtx.artist,
-      bpm: dtx.bpm,
+      bpm: shownBpm,
       level: lvl,
       label: chartInfo.label,
     };
@@ -536,7 +774,13 @@ async function openChart(song, chartInfo) {
     el.screenSelect.hidden = true;
     el.screenPlayer.hidden = false;
     hideOverlay();
+    if (!lanePanel.hidden) buildSyncSection();
 
+    if (at > 0) player.seek(at);
+    if (!autoplay) {
+      el.btnPlay.textContent = 'Play';
+      return;
+    }
     await player.play();
     el.btnPlay.textContent = 'Pause';
 
@@ -677,10 +921,11 @@ async function exportChartPdfFromLibrary(song, chartInfo) {
     const blob = fileMap.get(chartInfo.path);
     if (!blob) throw new Error('Chart file missing from local storage.');
     const dtx = parseDTX(decodeText(await blob.arrayBuffer()));
+    const bpm = await gpDisplayInfo(song, chartInfo, fileMap, dtx);
     await exportPdf(dtx, {
       title: dtx.title || song.title,
       artist: dtx.artist,
-      bpm: dtx.bpm,
+      bpm,
       level: fmtLevel(dtx.level),
       label: chartInfo.label,
     });
@@ -738,10 +983,11 @@ async function openChartViewerFromLibrary(song, chartInfo) {
     const blob = fileMap.get(chartInfo.path);
     if (!blob) throw new Error('Chart file missing from local storage.');
     const dtx = parseDTX(decodeText(await blob.arrayBuffer()));
+    const bpm = await gpDisplayInfo(song, chartInfo, fileMap, dtx);
     await openChartViewer(dtx, {
       title: dtx.title || song.title,
       artist: dtx.artist,
-      bpm: dtx.bpm,
+      bpm,
       level: fmtLevel(dtx.level),
       label: chartInfo.label,
     });
@@ -834,7 +1080,7 @@ el.seek.addEventListener('change', () => {
 
 // ---- shared setting setters (keep the bottom bar and the panel in sync) ----
 
-const steppers = { scroll: [], playSpeed: [], offsetGlobal: [], offsetChart: [], tabZoom: [] };
+const steppers = { scroll: [], playSpeed: [], offsetGlobal: [], offsetChart: [], tabZoom: [], syncCoarse: [], syncFine: [], feetRun: [] };
 const volEls = { volMaster: [], volBgm: [], volNotes: [] }; // range inputs
 
 function refreshSteppers(key) {
@@ -934,11 +1180,30 @@ const STEPPER_DEFS = {
     min: 0.25, max: 4, step: 0.25, fmt: fmtX,
     get: () => settings.tabZoom, apply: setTabZoomSetting,
   },
+  // Two steps over the same value: coarse for long intros, fine for nudging.
+  syncCoarse: {
+    min: -60000, max: 60000, step: 100, fmt: fmtMs,
+    get: () => syncShiftValue(), apply: setSyncShift,
+    enabled: () => !!currentSync()?.audio,
+  },
+  syncFine: {
+    min: -60000, max: 60000, step: 5, fmt: fmtMs,
+    get: () => syncShiftValue(), apply: setSyncShift,
+    enabled: () => !!currentSync()?.audio,
+  },
+  // Kicks at most this far apart form a run that alternates feet.
+  feetRun: {
+    min: 60, max: 250, step: 10, fmt: (v) => `${Math.round(v)} ms`,
+    get: () => feetRunValue(), apply: setFeetRun,
+    enabled: () => !!currentSync(),
+  },
 };
 
-// A −/+ stepper with press-and-hold repeat.
+// A −/+ stepper with press-and-hold repeat; the value is also a text box
+// that takes any number in range (not snapped to the step).
 function makeStepper(key) {
   const { min, max, step, fmt, get, apply: applyValue, enabled } = STEPPER_DEFS[key];
+  const decimals = STEPPER_DEFS[key].decimals ?? (step < 1 ? 2 : 0);
 
   const root = document.createElement('span');
   root.className = 'stepper';
@@ -950,19 +1215,24 @@ function makeStepper(key) {
   };
   const down = mkBtn('−');
   const up = mkBtn('+');
-  const val = document.createElement('span');
+  const val = document.createElement('input');
+  val.type = 'text';
+  val.inputMode = decimals ? 'decimal' : 'numeric';
   val.className = 'stepper-val';
+  val.autocomplete = 'off';
+  val.spellcheck = false;
 
   const stepper = {
     el: root,
     refresh() {
       if (enabled && !enabled()) {
-        val.textContent = '—';
-        down.disabled = up.disabled = true;
+        val.value = '—';
+        down.disabled = up.disabled = val.disabled = true;
         return;
       }
+      val.disabled = false;
       const v = get();
-      val.textContent = fmt(v);
+      if (document.activeElement !== val) val.value = fmt(v);
       down.disabled = v <= min + 1e-9;
       up.disabled = v >= max - 1e-9;
     },
@@ -973,10 +1243,38 @@ function makeStepper(key) {
     v = Math.max(min, Math.min(max, +v.toFixed(4)));
     if (v !== get()) applyValue(v);
   };
+  // Typed entry: focus shows the bare number; Enter or leaving commits,
+  // Escape reverts. Anything unparsable reverts too.
+  val.addEventListener('focus', () => {
+    val.value = String(+get().toFixed(decimals));
+    val.select();
+  });
+  const commit = () => {
+    const n = parseFloat(val.value.replace(/[x×\s]|ms/gi, '').replace(',', '.'));
+    if (Number.isFinite(n) && !(enabled && !enabled())) {
+      const v = Math.max(min, Math.min(max, +n.toFixed(decimals)));
+      if (v !== get()) applyValue(v);
+    }
+    stepper.refresh();
+  };
+  val.addEventListener('blur', commit);
+  val.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      val.blur(); // commits
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      e.stopPropagation(); // don't close the panel / leave the player
+      val.value = String(+get().toFixed(decimals));
+      val.blur();
+    }
+  });
+
   for (const [btn, d] of [[down, -1], [up, 1]]) {
     let holdTimer = 0, repeatTimer = 0;
     btn.addEventListener('pointerdown', (e) => {
       e.preventDefault();
+      if (document.activeElement === val) val.blur(); // commit typed text first
       bump(d);
       holdTimer = setTimeout(() => { repeatTimer = setInterval(() => bump(d), 80); }, 400);
     });
@@ -1301,8 +1599,801 @@ function buildPlaybackSection() {
   }
 }
 
+// ---- recording sync (Guitar Pro charts) ----
+
+const AUDIO_ACCEPT = 'audio/*,.ogg,.mp3,.wav,.m4a,.aac,.flac,.opus,.webm,.xa';
+const modelCache = new Map(); // `${songId}::${path}` -> parsed model.json
+
+function currentSync() {
+  return current?.song.source === 'guitarpro' ? { ...NO_SYNC, ...current.song.sync } : null;
+}
+
+async function loadModel(song, path, fileMap) {
+  const key = `${song.id}::${path}`;
+  if (!modelCache.has(key)) {
+    const blob = fileMap.get(path);
+    if (!blob) throw new Error('This chart is missing its Guitar Pro model. Try re-importing the song.');
+    modelCache.set(key, JSON.parse(await blob.text()));
+  }
+  return modelCache.get(key);
+}
+
+// Guitar Pro charts timed to a recording change tempo nearly every measure,
+// so the chart viewer labels them with the score's tempos, and the BPM shown
+// is the score's. Returns the BPM to display.
+async function gpDisplayInfo(song, chartInfo, fileMap, dtx) {
+  if (song.source !== 'guitarpro') return dtx.bpm;
+  const nominal = chartInfo.bpm ?? dtx.bpm;
+  const sync = { ...NO_SYNC, ...song.sync };
+  if (!sync.audio || !chartInfo.model) return nominal;
+  try {
+    const model = await loadModel(song, chartInfo.model, fileMap);
+    const lead = buildTimedChart(model, barTimesForSync(model, sync)).leadBars;
+    const labels = new Map([[0, model.tempos[0].bpm]]);
+    // Labels sit at measure starts; a mid-measure change shows on the next one.
+    for (const t of model.tempos) labels.set(t.bar + lead + (t.tick === 0 ? 0 : 1), t.bpm);
+    dtx.tempoLabels = labels;
+  } catch (err) {
+    console.warn('Tempo labels unavailable:', err);
+  }
+  return nominal;
+}
+
+function bgmTime(dtx) {
+  return dtx?.chips.find((c) => c.ch === 0x01)?.time ?? 0;
+}
+
+// Sync changes are applied one at a time, in order.
+let syncQueue = Promise.resolve();
+
+// Regenerates a Guitar Pro song's charts for a sync state and stores them
+// with the changed files. Updates fileMap; resolves to the updated song.
+async function saveSongSync(song, fileMap, sync, putFiles = [], deletePaths = []) {
+  for (const f of putFiles) fileMap.set(f.path, f.blob);
+  for (const p of deletePaths) fileMap.delete(p);
+  const charts = [];
+  for (const d of song.dtxs) {
+    const model = await loadModel(song, d.model, fileMap);
+    charts.push({ path: d.path, origPath: d.path, blob: dtxBlob(gpChartText(model, sync, d.path)) });
+  }
+  for (const f of charts) fileMap.set(f.path, f.blob);
+  const updated = { ...song, sync, size: [...fileMap.values()].reduce((a, b) => a + b.size, 0) };
+  await updateSong(updated, [...putFiles, ...charts], deletePaths);
+  return updated;
+}
+
+// Regenerates every chart of the open song for a new sync state, saves it,
+// and reloads the open chart at the same point of the recording.
+// patch: an object, or a (sync) => object | null function that runs in
+// queue order, so it sees every earlier change (null = nothing to do).
+function applySync(patch, { putFiles = [], deletePaths = [] } = {}) {
+  syncQueue = syncQueue.then(async () => {
+    if (!current || current.song.source !== 'guitarpro') return;
+    const { song, chartInfo, fileMap } = current;
+    if (typeof patch === 'function') {
+      try {
+        patch = await patch({ ...NO_SYNC, ...song.sync });
+      } catch (err) {
+        console.error(err);
+        alert(err.message);
+        return;
+      }
+      if (!patch) return;
+    }
+    const sync = { ...NO_SYNC, ...song.sync, ...patch };
+    showOverlay('Updating chart…');
+    try {
+      const updated = await saveSongSync(song, fileMap, sync, putFiles, deletePaths);
+
+      const wasPlaying = player?.playing;
+      const audioPos = (player?.time ?? 0) - bgmTime(currentDtx);
+      player?.pause();
+      current = { song: updated, chartInfo, fileMap };
+      const next = parseDTX(decodeText(await fileMap.get(chartInfo.path).arrayBuffer()));
+      await openChart(updated, chartInfo, {
+        fileMap, at: Math.max(0, audioPos + bgmTime(next)), autoplay: !!wasPlaying,
+      });
+      renderSongList();
+    } catch (err) {
+      console.error(err);
+      hideOverlay();
+      alert(`Could not update the chart:\n${err.message}`);
+    }
+    buildSyncSection();
+  });
+  return syncQueue;
+}
+
+let pendingShift = null;
+let shiftTimer = null;
+
+function syncShiftValue() {
+  return pendingShift ?? currentSync()?.shiftMs ?? 0;
+}
+
+// The value updates per click; the chart regenerates after the last one.
+function setSyncShift(v) {
+  pendingShift = v;
+  refreshSteppers('syncCoarse');
+  refreshSteppers('syncFine');
+  clearTimeout(shiftTimer);
+  shiftTimer = setTimeout(() => {
+    const shiftMs = pendingShift;
+    applySync({ shiftMs }).then(() => { if (pendingShift === shiftMs) pendingShift = null; });
+  }, 500);
+}
+
+function pickFile(accept) {
+  return new Promise((resolve) => {
+    // In the document while open: iOS Safari ignores clicks on detached inputs.
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = accept;
+    input.hidden = true;
+    input.onchange = () => { resolve(input.files[0] || null); input.remove(); };
+    input.addEventListener('cancel', () => { resolve(null); input.remove(); });
+    document.body.append(input);
+    input.click();
+  });
+}
+
+async function attachRecording() {
+  if (!current) return;
+  const file = await pickFile(AUDIO_ACCEPT);
+  if (!file) return;
+  showOverlay(`Decoding ${file.name}…`);
+  let buffer;
+  try {
+    // Decoding here also fills the decode cache for the reload below.
+    const OAC = window.OfflineAudioContext || window.webkitOfflineAudioContext;
+    buffer = await new SoundBank(player?.ctx || new OAC(1, 1, 44100)).decode(file);
+  } catch {
+    hideOverlay();
+    alert(`Could not decode ${file.name}. Try an OGG, MP3, WAV, M4A or XA file.`);
+    return;
+  }
+  const path = normPath('audio/' + basename(file.name));
+  const old = currentSync()?.audio?.path;
+  pendingShift = null;
+  await applySync(
+    {
+      audio: { path, name: file.name, size: file.size, duration: Math.round(buffer.duration * 1000) / 1000 },
+      kit: false, // the recording already has the drums
+      stems: null,
+      ...NO_TIMING,
+    },
+    {
+      putFiles: [{ path, origPath: file.name, blob: file }],
+      deletePaths: [...(old && old !== path ? [old] : []), ...stemPaths(currentSync())],
+    },
+  );
+}
+
+function removeRecording() {
+  const old = currentSync()?.audio?.path;
+  if (!old) return;
+  pendingShift = null;
+  applySync({ audio: null, kit: true, stems: null, ...NO_TIMING }, { deletePaths: [old, ...stemPaths(currentSync())] });
+}
+
+// ---- drum separation (separate.js) ----
+
+function stemPaths(sync) {
+  return Object.values(sync?.stems?.files || {});
+}
+
+// Decodes the open song's drum stems and hands them to the player, which
+// slices one keysound per drum note. missing / failed collect problems.
+async function loadStemKeysounds(song, fileMap, dtx, missing, failed) {
+  const sync = song.source === 'guitarpro' ? { ...NO_SYNC, ...song.sync } : null;
+  if (!stemsInUse(sync)) {
+    player.setStemKeysounds(null);
+    return;
+  }
+  el.overlayText.textContent = 'Decoding drum stems…';
+  const buffers = {};
+  for (const [name, path] of Object.entries(sync.stems.files)) {
+    if (name === 'nodrums') continue;
+    const blob = fileMap.get(path);
+    if (!blob) { missing.push(path); continue; }
+    try { buffers[name] = await player.bank.decode(blob); } catch { failed.push(path); }
+  }
+  player.setStemKeysounds(buffers, bgmTime(dtx));
+}
+
+let separating = null; // { controller, progress, phase, songId, t0 } while running
+let modelState = null; // listModels() result; null until first read
+let modelTask = null;  // { controller, text } while a model installs
+
+function modelsReady() {
+  return !!(modelState?.drums && modelState?.drumsep);
+}
+
+async function refreshModels() {
+  modelState = await listModels().catch(() => ({ drums: null, drumsep: null }));
+  buildModelsSection();
+  buildSyncSection();
+}
+
+async function separateDrums() {
+  const sync = currentSync();
+  if (!sync?.audio || separating) return;
+  const { song, fileMap } = current;
+  const controller = new AbortController();
+  separating = { controller, progress: 0, phase: 'Starting', songId: song.id, t0: performance.now() };
+  buildSyncSection();
+  try {
+    const OAC = window.OfflineAudioContext || window.webkitOfflineAudioContext;
+    const buffer = await new SoundBank(player?.ctx || new OAC(1, 1, 44100)).decode(fileMap.get(sync.audio.path));
+    const { separateRecording, STEM_DIR } = await import('./separate.js');
+    const res = await separateRecording(buffer, {
+      signal: controller.signal,
+      onProgress: (p, phase, stats) => {
+        if (!separating) return;
+        separating.progress = p;
+        if (phase) { separating.phase = phase; separating.stats = ''; }
+        if (stats) separating.stats = stats;
+        updateSeparateStatus();
+      },
+    });
+    separating = null;
+    const files = {};
+    const putFiles = [];
+    for (const [name, blob] of Object.entries(res.files)) {
+      const path = STEM_DIR + name + (blob.type === 'audio/ogg' ? '.ogg' : '.flac');
+      files[name] = path;
+      putFiles.push({ path, origPath: path, blob });
+    }
+    const stems = {
+      files,
+      models: res.models,
+      backend: res.backend,
+      seconds: Math.round(res.seconds),
+      bytes: putFiles.reduce((a, f) => a + f.blob.size, 0),
+      at: Date.now(),
+      use: true,
+    };
+    if (current?.song.id === song.id) {
+      const old = stemPaths(currentSync()).filter((p) => !Object.values(files).includes(p));
+      await applySync({ stems, kit: false }, { putFiles, deletePaths: old });
+    } else {
+      // Another song was opened meanwhile: store the result with its own song.
+      const latest = (await listSongs()).find((s) => s.id === song.id);
+      if (!latest) return;
+      const synced = { ...NO_SYNC, ...latest.sync, stems, kit: false };
+      const old = stemPaths(latest.sync).filter((p) => !Object.values(files).includes(p));
+      await saveSongSync(latest, fileMap, synced, putFiles, old);
+      renderSongList();
+    }
+  } catch (err) {
+    separating = null;
+    if (err.name !== 'AbortError') {
+      console.error(err);
+      alert(`Drum separation failed:\n${err.message}`);
+    }
+    buildSyncSection();
+  }
+}
+
+function removeStems() {
+  const paths = stemPaths(currentSync());
+  if (!paths.length) return;
+  applySync({ stems: null }, { deletePaths: paths });
+}
+
+function separateStatusText(sync) {
+  if (separating && separating.songId === current?.song.id) {
+    const { progress, phase, t0, stats } = separating;
+    let text = `${phase}… ${Math.round(progress * 100)}%`;
+    const elapsed = (performance.now() - t0) / 1000;
+    if (progress > 0.03 && elapsed > 5) text += ` · about ${fmtTime((elapsed / progress) * (1 - progress) + 30)} left`;
+    if (stats) text += ` · ${stats}`;
+    return text;
+  }
+  const st = sync.stems;
+  if (st) {
+    const size = st.bytes ? `, ${fmtSize(st.bytes)}` : '';
+    const how = `Separated with ${st.models.join(' + ')} (${st.backend}, ${fmtTime(st.seconds)}${size}).`;
+    if (!st.use) return `${how} Off: the full recording plays.`;
+    let text = `${how} The recording plays without its drums, and every drum note plays its own hit from it.`;
+    if (!sync.barTimes && !sync.align) text += ' Align the chart first so each note finds its hit.';
+    return text;
+  }
+  if (!modelState) return '';
+  if (!modelsReady()) return 'Splits the recording into a drumless backing track and one keysound per drum note. Install the two separation models first (Separation models, below).';
+  let text = 'Splits the recording into a drumless backing track and one keysound per drum note. Takes a few minutes.';
+  if (!navigator.gpu) text += ' This browser has no WebGPU, so it runs on the CPU and is much slower.';
+  return text;
+}
+
+function updateSeparateStatus() {
+  const node = document.getElementById('sync-sep-status');
+  const sync = currentSync();
+  if (node && sync) node.textContent = separateStatusText(sync);
+}
+
+function pickFiles(accept) {
+  return new Promise((resolve) => {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = accept;
+    input.multiple = true;
+    input.hidden = true;
+    input.onchange = () => { resolve([...input.files]); input.remove(); };
+    input.addEventListener('cancel', () => { resolve([]); input.remove(); });
+    document.body.append(input);
+    input.click();
+  });
+}
+
+async function installModels(kind) {
+  if (modelTask) return;
+  let run;
+  if (kind === 'files') {
+    const files = await pickFiles('.onnx,.json');
+    if (!files.length) return;
+    run = (opts) => installFromFiles(files, opts);
+  } else {
+    const url = prompt('URL of a model’s .json manifest (its .onnx must sit next to it, and the server must allow CORS):');
+    if (!url?.trim()) return;
+    run = (opts) => installFromUrl(url.trim(), opts);
+  }
+  const controller = new AbortController();
+  modelTask = { controller, text: 'Installing…' };
+  buildModelsSection();
+  try {
+    await run({
+      signal: controller.signal,
+      onProgress: (p, m) => {
+        if (!modelTask) return;
+        modelTask.text = `Installing ${m.name}… ${Math.round(p * 100)}%`;
+        const node = document.getElementById('model-status');
+        if (node) node.textContent = modelTask.text;
+      },
+    });
+  } catch (err) {
+    if (err.name !== 'AbortError') {
+      console.error(err);
+      alert(`Model install failed:\n${err.message}`);
+    }
+  }
+  modelTask = null;
+  await refreshModels();
+}
+
+function buildModelsSection() {
+  const wrap = $('model-opts');
+  if (!wrap) return;
+  wrap.replaceChildren();
+  const note = (text) => {
+    const p = document.createElement('p');
+    p.className = 'panel-note';
+    p.textContent = text;
+    wrap.append(p);
+    return p;
+  };
+  if (!opfsAvailable()) {
+    note('This browser can’t store separation models.');
+    return;
+  }
+  const row = (text, ...nodes) => {
+    const r = document.createElement('span');
+    r.className = 'display-row sync-recording';
+    r.append(text, ...nodes);
+    wrap.append(r);
+    return r;
+  };
+  const button = (text, onclick, title = '') => {
+    const b = document.createElement('button');
+    b.className = 'btn small';
+    b.textContent = text;
+    b.title = title;
+    b.onclick = onclick;
+    return b;
+  };
+  for (const [role, label] of Object.entries(ROLES)) {
+    const m = modelState?.[role];
+    const name = document.createElement('span');
+    name.className = 'sync-file';
+    name.textContent = modelState ? (m ? `${m.manifest.name} (${fmtSize(m.size)})` : 'Not installed') : '…';
+    name.title = m ? `${m.manifest.stems.join(', ')} · ${m.manifest.sampleRate} Hz` : '';
+    const actions = document.createElement('span');
+    if (m && !modelTask) {
+      actions.append(button('Remove', async () => {
+        if (!confirm(`Remove the ${label.toLowerCase()} (${m.manifest.name})?`)) return;
+        await removeModel(role);
+        await refreshModels();
+      }));
+    }
+    row(label, name, actions);
+  }
+  const actions = document.createElement('span');
+  if (modelTask) {
+    actions.append(button('Cancel', () => modelTask?.controller.abort()));
+  } else {
+    actions.append(
+      button('Import files…', () => installModels('files'), 'Pick a model’s .onnx and .json files (both models at once is fine).'),
+      button('From URL…', () => installModels('url'), 'Download a model from the URL of its .json manifest.'),
+    );
+  }
+  row('Add', actions);
+  const status = note(modelTask?.text || '');
+  status.id = 'model-status';
+  if (!modelTask) {
+    note('Models made from Music-Source-Separation-Training checkpoints with tools/msst-onnx/export.py (see its README). ' +
+      'They stay in this browser. ' + (navigator.gpu ? 'Runs on the GPU (WebGPU).' : 'No WebGPU here: separation runs on the CPU and is slow.'));
+  }
+  if (!modelState) refreshModels();
+}
+
+
+// ---- automatic alignment ----
+
+let aligning = null; // { controller, progress, songId } while running
+
+// All charts of a song share its measures; their notes together give the
+// alignment the most to go on.
+async function songAlignModel(song, fileMap) {
+  const models = [];
+  for (const d of song.dtxs) models.push(await loadModel(song, d.model, fileMap));
+  const bars = models[0].bars.map((b, i) => ({ ticks: b.ticks, notes: models.flatMap((m) => m.bars[i]?.notes || []) }));
+  return { ...models[0], bars };
+}
+
+async function autoAlign(pins = currentSync()?.pins || []) {
+  const sync = currentSync();
+  if (!sync?.audio || aligning) return;
+  const { song, fileMap } = current;
+  const controller = new AbortController();
+  aligning = { controller, progress: 0, songId: song.id };
+  buildSyncSection();
+  try {
+    const OAC = window.OfflineAudioContext || window.webkitOfflineAudioContext;
+    const buffer = await new SoundBank(player?.ctx || new OAC(1, 1, 44100)).decode(fileMap.get(sync.audio.path));
+    const model = await songAlignModel(song, fileMap);
+    const { alignRecording } = await import('./align.js');
+    const res = await alignRecording(buffer, model, {
+      pins,
+      signal: controller.signal,
+      onProgress: (p) => { if (aligning) { aligning.progress = p; updateAlignStatus(); } },
+    });
+    aligning = null;
+    if (current?.song.id !== song.id) return; // another song was opened meanwhile
+    const uncertain = res.confidence.map((c, b) => (c !== null && c < 0.35 ? b : -1)).filter((b) => b >= 0);
+    pendingShift = null;
+    await applySync({
+      barTimes: res.barTimes,
+      shiftMs: 0,
+      pins,
+      align: { overall: res.overall, method: res.method, uncertain, at: Date.now() },
+    });
+  } catch (err) {
+    aligning = null;
+    if (err.name !== 'AbortError') {
+      console.error(err);
+      alert(`Auto-align failed:\n${err.message}`);
+    }
+    buildSyncSection();
+  }
+}
+
+// Pins the measure nearest the playhead to this point of the recording (as
+// heard, so minus the output latency the display offset compensates), then
+// re-aligns. Pins are soft (±0.25 s), so tapping a little late is fine.
+async function pinAtPlayhead() {
+  const sync = currentSync();
+  if (!sync?.audio || !player || aligning) return;
+  const { song, chartInfo, fileMap } = current;
+  const model = await loadModel(song, chartInfo.model, fileMap);
+  const now = player.time - bgmTime(currentDtx) - (settings.offsetMs / 1000) * player.playSpeed;
+  const times = barTimesForSync(model, sync);
+  let bar = 0;
+  for (let b = 1; b < model.bars.length; b++) if (Math.abs(times[b] - now) < Math.abs(times[bar] - now)) bar = b;
+  // Keep the pins in order: drop any the new one contradicts.
+  const pins = (sync.pins || []).filter((p) => p.bar !== bar && (p.bar < bar ? p.time < now : p.time > now));
+  pins.push({ bar, time: now });
+  pins.sort((a, b) => a.bar - b.bar);
+  autoAlign(pins);
+}
+
+function leadBarsNow() {
+  const sync = currentSync();
+  const model = current && modelCache.get(`${current.song.id}::${current.chartInfo.model}`);
+  if (!sync?.audio || !model) return 0;
+  try { return buildTimedChart(model, barTimesForSync(model, sync)).leadBars; } catch { return 0; }
+}
+
+// Measure numbers as the player shows them (lead-in measures included).
+function measureList(bars) {
+  const lead = leadBarsNow();
+  const nums = bars.map((b) => b + lead);
+  const parts = [];
+  for (let i = 0; i < nums.length; i++) {
+    let j = i;
+    while (j + 1 < nums.length && nums[j + 1] === nums[j] + 1) j++;
+    const a = String(nums[i]).padStart(3, '0');
+    parts.push(j > i ? `${a}–${String(nums[j]).padStart(3, '0')}` : a);
+    i = j;
+  }
+  return parts.length > 6 ? parts.slice(0, 6).join(', ') + ', …' : parts.join(', ');
+}
+
+function alignStatusText(sync) {
+  if (aligning && aligning.songId === current?.song.id) return `Aligning… ${Math.round(aligning.progress * 100)}%`;
+  const a = sync.align;
+  if (!a) return 'Not aligned yet. Auto-align times every measure to the recording.';
+  const pct = Math.round(a.overall * 100);
+  let text = `${a.method === 'constant' ? 'Steady tempo' : 'Follows the recording’s tempo'} · ${pct}% confident.`;
+  if (a.overall < 0.5) text += ' This may be wrong: while it plays, press P at a few downbeats to pin them, which re-aligns.';
+  else if (a.uncertain?.length) text += ` Uncertain: measure${a.uncertain.length > 1 ? 's' : ''} ${measureList(a.uncertain)}.`;
+  if (sync.pins?.length) text += ` ${sync.pins.length} pinned.`;
+  return text;
+}
+
+function updateAlignStatus() {
+  const node = document.getElementById('sync-align-status');
+  const sync = currentSync();
+  if (node && sync) node.textContent = alignStatusText(sync);
+}
+
+function buildSyncSection() {
+  buildFeetSection();
+  const wrap = $('sync-opts');
+  if (!wrap) return;
+  wrap.replaceChildren();
+  const sync = currentSync();
+  if (!sync) {
+    const p = document.createElement('p');
+    p.className = 'panel-note';
+    p.textContent = 'For charts imported from Guitar Pro files: open one to attach a recording of the song and time the chart to it.';
+    wrap.append(p);
+    return;
+  }
+  const row = (text, ...nodes) => {
+    const r = document.createElement('span');
+    r.className = 'display-row';
+    r.append(text, ...nodes);
+    wrap.append(r);
+    return r;
+  };
+  const button = (text, onclick, title = '') => {
+    const b = document.createElement('button');
+    b.className = 'btn small';
+    b.textContent = text;
+    b.title = title;
+    b.onclick = onclick;
+    return b;
+  };
+
+  const name = document.createElement('span');
+  name.className = 'sync-file';
+  name.textContent = sync.audio ? `${sync.audio.name} (${fmtTime(sync.audio.duration)})` : 'None';
+  name.title = sync.audio?.name || '';
+  const actions = document.createElement('span');
+  actions.append(button(sync.audio ? 'Replace…' : 'Attach…', attachRecording, 'Pick an audio file of this song (OGG, MP3, WAV, M4A…). It is stored with the song in this browser.'));
+  if (sync.audio) actions.append(button('Remove', removeRecording));
+  row(name, actions).classList.add('sync-recording');
+
+  const kit = document.createElement('input');
+  kit.type = 'checkbox';
+  kit.checked = sync.kit !== false;
+  kit.onchange = () => applySync({ kit: kit.checked });
+  const kitLabel = document.createElement('label');
+  kitLabel.append(kit, ' Play drum kit');
+  kitLabel.title = 'Play the built-in drum sounds for the chart’s notes. Off by default with a recording, since it already has the drums.';
+  row('Drum sounds', kitLabel);
+
+  if (sync.audio) {
+    const coarse = makeStepper('syncCoarse');
+    coarse.el.title = 'Move the chart against the recording: positive = notes later. 100 ms steps.';
+    row('Shift chart', coarse.el);
+    const fine = makeStepper('syncFine');
+    fine.el.title = 'Fine shift, 5 ms steps.';
+    row('Fine shift', fine.el);
+
+    const running = aligning && aligning.songId === current.song.id;
+    const alignActions = document.createElement('span');
+    if (running) {
+      alignActions.append(button('Cancel', () => aligning?.controller.abort()));
+    } else {
+      alignActions.append(button(sync.align ? 'Re-align' : 'Auto-align', () => autoAlign(),
+        'Find where every measure falls in the recording, following its tempo changes.'));
+      if (sync.barTimes || sync.pins?.length) {
+        alignActions.append(button('Reset', () => applySync({ ...NO_TIMING }), 'Back to the score’s own tempo (clears the alignment, pins and shift).'));
+      }
+    }
+    row('Timing', alignActions).classList.add('sync-recording');
+    const status = document.createElement('span');
+    status.id = 'sync-align-status';
+    status.className = 'sync-status';
+    status.textContent = alignStatusText(sync);
+    wrap.append(status);
+
+    if (!running) {
+      const pinActions = document.createElement('span');
+      pinActions.append(button('Pin (P)', pinAtPlayhead,
+        'While the recording plays, press at a downbeat: the nearest measure is pinned there and the chart re-aligns. Shortcut: P.'));
+      if (sync.pins?.length) pinActions.append(button('Clear', () => applySync({ pins: [] }), 'Forget the pinned measures (keeps the current timing).'));
+      row('Pins', pinActions).classList.add('sync-recording');
+    }
+
+    const sepRunning = separating && separating.songId === current.song.id;
+    const sepActions = document.createElement('span');
+    if (sepRunning) {
+      sepActions.append(button('Cancel', () => separating?.controller.abort()));
+    } else if (sync.stems) {
+      const use = document.createElement('input');
+      use.type = 'checkbox';
+      use.checked = !!sync.stems.use;
+      use.onchange = () => {
+        const on = use.checked;
+        applySync((s) => (s.stems ? { stems: { ...s.stems, use: on }, kit: on ? false : s.kit } : null));
+      };
+      const useLabel = document.createElement('label');
+      useLabel.append(use, ' Use');
+      useLabel.title = 'Play the drumless backing track, with every drum note playing its own hit from the recording.';
+      sepActions.append(useLabel, button('Remove', removeStems, 'Delete the separated stems of this song.'));
+    } else {
+      const b = button('Separate drums', separateDrums,
+        'Split the recording into a drumless backing track and drum keysounds, in this browser.');
+      b.disabled = !modelsReady() || !!separating;
+      sepActions.append(b);
+    }
+    row('Drum stems', sepActions).classList.add('sync-recording');
+    const sepStatus = document.createElement('span');
+    sepStatus.id = 'sync-sep-status';
+    sepStatus.className = 'sync-status';
+    sepStatus.textContent = separateStatusText(sync);
+    wrap.append(sepStatus);
+    if (!modelState) refreshModels();
+  }
+}
+
+// ---- foot edits (Guitar Pro charts) ----
+
+let editingFeet = false; // session only: taps in the tab strip edit feet
+
+function setEditingFeet(on) {
+  editingFeet = on;
+  if (player) player.editFeet = on && current?.song.source === 'guitarpro';
+}
+
+// A tapped kick switches feet; a tapped hi-hat or pedal note toggles the
+// pedal at that point. Edits are stored only where they differ from what
+// the rules would do on their own.
+function editFoot(chip) {
+  if (chip.m == null || !current) return;
+  const path = current.chartInfo.path;
+  applySync((sync) => (current.chartInfo.path === path ? footEditPatch(chip, sync) : null));
+}
+
+async function footEditPatch(chip, sync) {
+  const { song, chartInfo, fileMap } = current;
+  const model = await loadModel(song, chartInfo.model, fileMap);
+  const lead = sync.audio ? buildTimedChart(model, barTimesForSync(model, sync)).leadBars : 0;
+  const bar = chip.m - lead;
+  if (!model.bars[bar]) return null;
+  const tick = Math.round(chip.pos * model.bars[bar].ticks);
+
+  const feet = feetOf(sync);
+  const edits = { ...(feet.edits[chartInfo.path] || {}) };
+  const notesAt = (m) => m.bars[bar].notes.filter((n) => n.tick === tick).map((n) => n.ch);
+  let key, want, auto;
+  if (chip.ch === CH_BD || chip.ch === CH_LBD) {
+    key = kickKey(bar, tick);
+    want = notesAt(assignFeet(model, feet, edits)).includes(CH_LBD) ? 'R' : 'L';
+    delete edits[key];
+    auto = notesAt(assignFeet(model, feet, edits)).includes(CH_LBD) ? 'L' : 'R';
+  } else {
+    key = pedalKey(bar, tick);
+    want = notesAt(assignFeet(model, feet, edits)).includes(CH_LP) ? '-' : '+';
+    delete edits[key];
+    auto = notesAt(assignFeet(model, feet, edits)).includes(CH_LP) ? '+' : '-';
+  }
+  if (want !== auto) edits[key] = want;
+  const all = { ...feet.edits, [chartInfo.path]: edits };
+  if (!Object.keys(edits).length) delete all[chartInfo.path];
+  return { feet: { ...feet, edits: all } };
+}
+
+function editCount(sync) {
+  return Object.keys(feetOf(sync).edits[current?.chartInfo.path] || {}).length;
+}
+
+// Run-limit clicks update the value at once; the chart regenerates after
+// the last one, like the sync shift.
+let pendingRun = null;
+let runTimer = null;
+
+function feetRunValue() {
+  return pendingRun ?? feetOf(currentSync()).runMs;
+}
+
+function setFeetRun(v) {
+  pendingRun = v;
+  refreshSteppers('feetRun');
+  clearTimeout(runTimer);
+  runTimer = setTimeout(() => {
+    const runMs = pendingRun;
+    applySync((s) => ({ feet: { ...feetOf(s), runMs } })).then(() => {
+      if (pendingRun === runMs) pendingRun = null;
+    });
+  }, 500);
+}
+
+function buildFeetSection() {
+  const wrap = $('feet-opts');
+  if (!wrap) return;
+  wrap.replaceChildren();
+  const sync = currentSync();
+  if (!sync) {
+    const p = document.createElement('p');
+    p.className = 'panel-note';
+    p.textContent = 'For charts imported from Guitar Pro files: split fast kick runs between both feet and add hi-hat pedal closes.';
+    wrap.append(p);
+    return;
+  }
+  const row = (text, ...nodes) => {
+    const r = document.createElement('span');
+    r.className = 'display-row';
+    r.append(text, ...nodes);
+    wrap.append(r);
+    return r;
+  };
+  const button = (text, onclick, title = '') => {
+    const b = document.createElement('button');
+    b.className = 'btn small';
+    b.textContent = text;
+    b.title = title;
+    b.onclick = onclick;
+    return b;
+  };
+  const feet = feetOf(sync);
+  const check = (text, key, title) => {
+    const input = document.createElement('input');
+    input.type = 'checkbox';
+    input.checked = !!feet[key];
+    input.onchange = () => {
+      const on = input.checked;
+      applySync((s) => ({ feet: { ...feetOf(s), [key]: on } }));
+    };
+    const label = document.createElement('label');
+    label.append(input, ' ', text);
+    label.title = title;
+    return label;
+  };
+  row('Kicks', check('Split fast runs between both feet', 'kickSplit',
+    'Kicks closer together than the run limit alternate right and left foot, by their place in the beat.'));
+  row('Run limit', makeStepper('feetRun').el).title = 'Kicks at most this far apart count as one run.';
+  row('Hi-hat', check('Close with the pedal', 'hhClose',
+    'Adds a hi-hat pedal note where a closed hit follows an open hi-hat.'));
+
+  const edit = document.createElement('input');
+  edit.type = 'checkbox';
+  edit.checked = editingFeet;
+  edit.onchange = () => setEditingFeet(edit.checked);
+  const editLabel = document.createElement('label');
+  editLabel.append(edit, ' Edit in the tab strip');
+  editLabel.title = 'While paused, tap a kick in the tab strip to switch feet, or a hi-hat note to add or remove the pedal. Needs the tab strip on.';
+  const actions = document.createElement('span');
+  actions.append(editLabel);
+  const n = editCount(sync);
+  if (n) {
+    const path = current.chartInfo.path;
+    actions.append(button(`Reset ${n} edit${n > 1 ? 's' : ''}`, () => applySync((s) => {
+      const f = feetOf(s);
+      const edits = { ...f.edits };
+      delete edits[path];
+      return { feet: { ...f, edits } };
+    }), 'Forget the note edits on this chart.'));
+  }
+  row('Edits', actions).classList.add('sync-recording');
+}
+
 function openSettingsPanel() {
   buildPlaybackSection();
+  buildSyncSection();
+  buildModelsSection();
   buildLaneOrderList();
   buildNoteColorList();
   buildDisplayOpts();
@@ -1344,6 +2435,9 @@ document.addEventListener('keydown', (e) => {
     // so this always means play/pause and never re-clicks a toggle.
     e.preventDefault();
     $('btn-play').click();
+  } else if (e.code === 'KeyP' && !e.metaKey && !e.ctrlKey && !e.altKey && currentSync()?.audio) {
+    e.preventDefault();
+    pinAtPlayhead();
   }
 });
 
