@@ -97,7 +97,10 @@ class ConvSTFT(torch.nn.Module):
         y = y.reshape(m, frames, r, self.hop)
         out = None
         for q in range(r):
-            seg = y[:, :, q, :].reshape(m, frames * self.hop)
+            # A range keeps the rank and exports as Slice; y[:, :, q, :]
+            # would be a rank-dropping Gather, whose WebGPU shader Firefox
+            # (Metal) fails to compile.
+            seg = y[:, :, q:q + 1, :].reshape(m, frames * self.hop)
             seg = F.pad(seg, (q * self.hop, (r - 1 - q) * self.hop))
             out = seg if out is None else out + seg
         return out
