@@ -7,6 +7,7 @@
 
 import { SoundBank } from './audio.js';
 import { Stretcher } from './stretch.js';
+import { assignSlices } from './stemslice.js';
 
 // Note types the user can color independently. Colors are kept per type even
 // when lanes are grouped, so e.g. RD chips stay distinguishable on the CY lane.
@@ -219,6 +220,7 @@ export class Player {
     this._sources = new Set();
     this._activeByWav = new Map();
     this._activeHH = new Map();
+    this._stems = null; // { name: AudioBuffer } separated drum stems, or null
 
     this.onFrame = null; // (player) called every rendered frame
     this.onEnded = null;
@@ -479,7 +481,24 @@ export class Player {
     this._rebuildLanes();
     this._buildTab();
     await this._prepareStretched(); // also computes this.duration
+    this._stems = null;
     return result;
+  }
+
+  // Separated drum stems ({ kick: AudioBuffer, … }, or null to stop using
+  // them): each drum chip then plays its own hit, sliced from its stem at
+  // the chip's place in the recording, which starts at song time bgmTime.
+  // Call after load(). Returns the number of chips that got a slice.
+  setStemKeysounds(stems, bgmTime = 0) {
+    this.stopAudio();
+    this._stems = stems;
+    if (!stems) {
+      for (const c of this.chips) delete c.slice;
+      return 0;
+    }
+    const data = {};
+    for (const [name, buf] of Object.entries(stems)) data[name] = { data: buf.getChannelData(0), sr: buf.sampleRate };
+    return assignSlices(this.chips, bgmTime, data);
   }
 
   async play() {
@@ -502,6 +521,11 @@ export class Player {
       const c = this.chips[i];
       if (c.time >= this.startOffset) break;
       this._schedIdx = i + 1;
+      if (c.slice) {
+        const offset = (this.startOffset - c.time) / this.playSpeed;
+        if (c.slice.len - offset > 0.05) this._playChip(c, this.ctxStart, offset);
+        continue;
+      }
       const s = this.bank.get(c.wav);
       if (!s) continue;
       const buffer = this._stretched.get(c.wav) || s.buffer;
@@ -901,6 +925,10 @@ export class Player {
   }
 
   _playChip(chip, when, offset) {
+    if (chip.slice) {
+      this._playSlice(chip.slice, when, offset);
+      return;
+    }
     const s = this.bank.get(chip.wav);
     if (!s) return;
     const at = Math.max(when, this.ctx.currentTime);
@@ -951,6 +979,28 @@ export class Player {
       if (this._activeHH.get(chip.wav) === src) this._activeHH.delete(chip.wav);
     };
     src.start(at, offset);
+  }
+
+  // A hit sliced from a separated stem. Slices end where the stem's next hit
+  // starts, so they never overlap and need no cut-off or choke logic; a short
+  // ramp at the end avoids a click. Like other one-shots they play at rate 1
+  // whatever the play speed.
+  _playSlice(slice, when, offset) {
+    const buffer = this._stems?.[slice.stem];
+    const dur = slice.len - offset;
+    if (!buffer || dur <= 0.002) return;
+    const at = Math.max(when, this.ctx.currentTime);
+    const src = this.ctx.createBufferSource();
+    src.buffer = buffer;
+    const gain = this.ctx.createGain();
+    const fade = Math.min(0.005, dur / 2);
+    gain.gain.setValueAtTime(1, at + dur - fade);
+    gain.gain.linearRampToValueAtTime(0, at + dur);
+    src.connect(gain);
+    gain.connect(this.noteGain);
+    this._sources.add(src);
+    src.onended = () => this._sources.delete(src);
+    src.start(at, slice.off + offset, dur);
   }
 
   // ---- rendering ----

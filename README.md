@@ -10,10 +10,12 @@ Drum mode only, autoplay only — it parses `.dtx` charts, plays the keysounds/B
 with sample-accurate Web Audio scheduling, and renders a DTXMania-style falling-notes
 lane view. No gameplay judgement or scoring.
 
-No build step and no package manager — plain ES modules. Two third-party
+No build step and no package manager — plain ES modules. Three third-party
 libraries are vendored unmodified under `js/vendor/` and loaded only when
-needed: an OGG decoder for Safari and [alphaTab](https://github.com/CoderLine/alphaTab)
-(MPL-2.0) for reading Guitar Pro files.
+needed: an OGG decoder for Safari, [alphaTab](https://github.com/CoderLine/alphaTab)
+(MPL-2.0) for reading Guitar Pro files, and
+[onnxruntime-web](https://github.com/microsoft/onnxruntime) (MIT) for drum
+separation.
 
 ## Running
 
@@ -52,6 +54,18 @@ browsers may cache files — hard-reload (Cmd+Shift+R) after updating.
   downbeats while the recording plays: the nearest measure is pinned there
   (tapping a little late is fine) and the chart re-aligns. **Reset** returns
   to the score's own tempo. The shift steppers still nudge the result.
+- **Drum stems** (same section) — splits the recording in the browser into a
+  drumless backing track and kick / snare / toms / hi-hat / ride / crash
+  stems, using two ONNX models converted from
+  [Music-Source-Separation-Training](https://github.com/ZFTurbo/Music-Source-Separation-Training)
+  checkpoints (WebGPU via a vendored onnxruntime-web; a few minutes per song).
+  With **Use** on, the backing track plays as BGM and every drum note plays
+  its own hit, cut from its stem at the note's place in the recording, up to
+  the next hit. Slices are recomputed whenever the chart loads, so they follow
+  re-alignment and shifts; align the chart first. The models aren't shipped:
+  convert them once with [`tools/msst-onnx`](tools/msst-onnx/README.md) and add
+  them under **Separation models** in Settings (stored in the browser's
+  private file storage). Stems are saved with the song as FLAC.
 - **Import URL** — download and import a ZIP directly from a URL. The hosting
   server must allow cross-origin requests (CORS); if it doesn't, download the
   file and use Import ZIP instead.

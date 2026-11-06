@@ -11,6 +11,7 @@ import { renderDrumKit, KIT_FILES } from './drumkit.js';
 import { buildTimedChart, barTimesForSync } from './gpsync.js';
 import { assignFeet, kickKey, pedalKey, DEFAULT_FEET, CH_BD, CH_LBD, CH_LP } from './feet.js';
 import { SoundBank } from './audio.js';
+import { ROLES, listModels, removeModel, installFromFiles, installFromUrl, opfsAvailable } from './models.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -273,11 +274,15 @@ async function importEntries(fallbackTitle, totalSize, entries) {
 // so charts can be regenerated (e.g. re-timed to a recording) later.
 // audio: the attached recording; barTimes: an alignment's measure starts
 // (audio seconds); align: its summary; pins: [{ bar, time }] marked by ear.
+// stems: drum separation of the recording (separate.js), or null:
+// { files: { nodrums, kick, snare, … }: stored paths, models, backend, at, use }.
+// With use on, the drumless backing plays as BGM and every drum note plays
+// its own hit sliced from the stems (stemslice.js).
 // feet: foot-assignment options (feet.js) plus per-chart note edits,
 // { [chartPath]: { [key]: action } }. Off unless chosen at import or in
 // Settings, so songs imported before this feature stay as they were.
 const NO_FEET = { ...DEFAULT_FEET, kickSplit: false, hhClose: false, edits: {} };
-const NO_SYNC = { audio: null, kit: true, shiftMs: 0, barTimes: null, align: null, pins: [], feet: NO_FEET };
+const NO_SYNC = { audio: null, kit: true, shiftMs: 0, barTimes: null, align: null, pins: [], feet: NO_FEET, stems: null };
 const NO_TIMING = { shiftMs: 0, barTimes: null, align: null, pins: [] };
 
 function feetOf(sync) {
@@ -298,9 +303,14 @@ function gpChartText(source, sync, path) {
   const kitVolume = sync.kit === false ? 0 : 100;
   if (!sync.audio) return writeDtx(model, model.tempos, { wavs: KIT_FILES, kitVolume });
   const timed = buildTimedChart(model, barTimesForSync(model, sync));
+  const bgm = stemsInUse(sync) ? sync.stems.files.nodrums : sync.audio.path;
   return writeDtx(timed.model, timed.tempos, {
-    wavs: KIT_FILES, kitVolume, bgm: { file: sync.audio.path, ...timed.bgm },
+    wavs: KIT_FILES, kitVolume, bgm: { file: bgm, ...timed.bgm },
   });
+}
+
+function stemsInUse(sync) {
+  return !!(sync?.audio && sync.stems?.use && sync.stems.files?.nodrums);
 }
 
 function dtxBlob(text) {
@@ -631,6 +641,7 @@ async function openChart(song, chartInfo, { fileMap = null, at = 0, autoplay = t
     const { missing, failed } = await player.load(dtx, resolve, (done, total) => {
       el.overlayText.textContent = `Decoding audio ${done} / ${total}…`;
     });
+    await loadStemKeysounds(song, fileMap, dtx, missing, failed);
 
     el.npTitle.textContent = dtx.title || song.title;
     const sub = [];
@@ -1504,6 +1515,22 @@ function bgmTime(dtx) {
 // Sync changes are applied one at a time, in order.
 let syncQueue = Promise.resolve();
 
+// Regenerates a Guitar Pro song's charts for a sync state and stores them
+// with the changed files. Updates fileMap; resolves to the updated song.
+async function saveSongSync(song, fileMap, sync, putFiles = [], deletePaths = []) {
+  for (const f of putFiles) fileMap.set(f.path, f.blob);
+  for (const p of deletePaths) fileMap.delete(p);
+  const charts = [];
+  for (const d of song.dtxs) {
+    const model = await loadModel(song, d.model, fileMap);
+    charts.push({ path: d.path, origPath: d.path, blob: dtxBlob(gpChartText(model, sync, d.path)) });
+  }
+  for (const f of charts) fileMap.set(f.path, f.blob);
+  const updated = { ...song, sync, size: [...fileMap.values()].reduce((a, b) => a + b.size, 0) };
+  await updateSong(updated, [...putFiles, ...charts], deletePaths);
+  return updated;
+}
+
 // Regenerates every chart of the open song for a new sync state, saves it,
 // and reloads the open chart at the same point of the recording.
 // patch: an object, or a (sync) => object | null function that runs in
@@ -1525,16 +1552,7 @@ function applySync(patch, { putFiles = [], deletePaths = [] } = {}) {
     const sync = { ...NO_SYNC, ...song.sync, ...patch };
     showOverlay('Updating chart…');
     try {
-      for (const f of putFiles) fileMap.set(f.path, f.blob);
-      for (const p of deletePaths) fileMap.delete(p);
-      const charts = [];
-      for (const d of song.dtxs) {
-        const model = await loadModel(song, d.model, fileMap);
-        charts.push({ path: d.path, origPath: d.path, blob: dtxBlob(gpChartText(model, sync, d.path)) });
-      }
-      for (const f of charts) fileMap.set(f.path, f.blob);
-      const updated = { ...song, sync, size: [...fileMap.values()].reduce((a, b) => a + b.size, 0) };
-      await updateSong(updated, [...putFiles, ...charts], deletePaths);
+      const updated = await saveSongSync(song, fileMap, sync, putFiles, deletePaths);
 
       const wasPlaying = player?.playing;
       const audioPos = (player?.time ?? 0) - bgmTime(currentDtx);
@@ -1610,9 +1628,13 @@ async function attachRecording() {
     {
       audio: { path, name: file.name, size: file.size, duration: Math.round(buffer.duration * 1000) / 1000 },
       kit: false, // the recording already has the drums
+      stems: null,
       ...NO_TIMING,
     },
-    { putFiles: [{ path, origPath: file.name, blob: file }], deletePaths: old && old !== path ? [old] : [] },
+    {
+      putFiles: [{ path, origPath: file.name, blob: file }],
+      deletePaths: [...(old && old !== path ? [old] : []), ...stemPaths(currentSync())],
+    },
   );
 }
 
@@ -1620,8 +1642,250 @@ function removeRecording() {
   const old = currentSync()?.audio?.path;
   if (!old) return;
   pendingShift = null;
-  applySync({ audio: null, kit: true, ...NO_TIMING }, { deletePaths: [old] });
+  applySync({ audio: null, kit: true, stems: null, ...NO_TIMING }, { deletePaths: [old, ...stemPaths(currentSync())] });
 }
+
+// ---- drum separation (separate.js) ----
+
+function stemPaths(sync) {
+  return Object.values(sync?.stems?.files || {});
+}
+
+// Decodes the open song's drum stems and hands them to the player, which
+// slices one keysound per drum note. missing / failed collect problems.
+async function loadStemKeysounds(song, fileMap, dtx, missing, failed) {
+  const sync = song.source === 'guitarpro' ? { ...NO_SYNC, ...song.sync } : null;
+  if (!stemsInUse(sync)) {
+    player.setStemKeysounds(null);
+    return;
+  }
+  el.overlayText.textContent = 'Decoding drum stems…';
+  const buffers = {};
+  for (const [name, path] of Object.entries(sync.stems.files)) {
+    if (name === 'nodrums') continue;
+    const blob = fileMap.get(path);
+    if (!blob) { missing.push(path); continue; }
+    try { buffers[name] = await player.bank.decode(blob); } catch { failed.push(path); }
+  }
+  player.setStemKeysounds(buffers, bgmTime(dtx));
+}
+
+let separating = null; // { controller, progress, phase, songId, t0 } while running
+let modelState = null; // listModels() result; null until first read
+let modelTask = null;  // { controller, text } while a model installs
+
+function modelsReady() {
+  return !!(modelState?.drums && modelState?.drumsep);
+}
+
+async function refreshModels() {
+  modelState = await listModels().catch(() => ({ drums: null, drumsep: null }));
+  buildModelsSection();
+  buildSyncSection();
+}
+
+async function separateDrums() {
+  const sync = currentSync();
+  if (!sync?.audio || separating) return;
+  const { song, fileMap } = current;
+  const controller = new AbortController();
+  separating = { controller, progress: 0, phase: 'Starting', songId: song.id, t0: performance.now() };
+  buildSyncSection();
+  try {
+    const OAC = window.OfflineAudioContext || window.webkitOfflineAudioContext;
+    const buffer = await new SoundBank(player?.ctx || new OAC(1, 1, 44100)).decode(fileMap.get(sync.audio.path));
+    const { separateRecording, STEM_DIR } = await import('./separate.js');
+    const res = await separateRecording(buffer, {
+      signal: controller.signal,
+      onProgress: (p, phase) => {
+        if (!separating) return;
+        separating.progress = p;
+        if (phase) separating.phase = phase;
+        updateSeparateStatus();
+      },
+    });
+    separating = null;
+    const files = {};
+    const putFiles = [];
+    for (const [name, blob] of Object.entries(res.files)) {
+      const path = STEM_DIR + name + '.flac';
+      files[name] = path;
+      putFiles.push({ path, origPath: path, blob });
+    }
+    const stems = {
+      files, models: res.models, backend: res.backend, seconds: Math.round(res.seconds), at: Date.now(), use: true,
+    };
+    if (current?.song.id === song.id) {
+      const old = stemPaths(currentSync()).filter((p) => !Object.values(files).includes(p));
+      await applySync({ stems, kit: false }, { putFiles, deletePaths: old });
+    } else {
+      // Another song was opened meanwhile: store the result with its own song.
+      const latest = (await listSongs()).find((s) => s.id === song.id);
+      if (!latest) return;
+      const synced = { ...NO_SYNC, ...latest.sync, stems, kit: false };
+      const old = stemPaths(latest.sync).filter((p) => !Object.values(files).includes(p));
+      await saveSongSync(latest, fileMap, synced, putFiles, old);
+      renderSongList();
+    }
+  } catch (err) {
+    separating = null;
+    if (err.name !== 'AbortError') {
+      console.error(err);
+      alert(`Drum separation failed:\n${err.message}`);
+    }
+    buildSyncSection();
+  }
+}
+
+function removeStems() {
+  const paths = stemPaths(currentSync());
+  if (!paths.length) return;
+  applySync({ stems: null }, { deletePaths: paths });
+}
+
+function separateStatusText(sync) {
+  if (separating && separating.songId === current?.song.id) {
+    const { progress, phase, t0 } = separating;
+    let text = `${phase}… ${Math.round(progress * 100)}%`;
+    const elapsed = (performance.now() - t0) / 1000;
+    if (progress > 0.03 && elapsed > 5) text += ` · about ${fmtTime((elapsed / progress) * (1 - progress) + 30)} left`;
+    return text;
+  }
+  const st = sync.stems;
+  if (st) {
+    const how = `Separated with ${st.models.join(' + ')} (${st.backend}, ${fmtTime(st.seconds)}).`;
+    if (!st.use) return `${how} Off: the full recording plays.`;
+    let text = `${how} The recording plays without its drums, and every drum note plays its own hit from it.`;
+    if (!sync.barTimes && !sync.align) text += ' Align the chart first so each note finds its hit.';
+    return text;
+  }
+  if (!modelState) return '';
+  if (!modelsReady()) return 'Splits the recording into a drumless backing track and one keysound per drum note. Install the two separation models first (Separation models, below).';
+  let text = 'Splits the recording into a drumless backing track and one keysound per drum note. Takes a few minutes.';
+  if (!navigator.gpu) text += ' This browser has no WebGPU, so it runs on the CPU and is much slower.';
+  return text;
+}
+
+function updateSeparateStatus() {
+  const node = document.getElementById('sync-sep-status');
+  const sync = currentSync();
+  if (node && sync) node.textContent = separateStatusText(sync);
+}
+
+function pickFiles(accept) {
+  return new Promise((resolve) => {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = accept;
+    input.multiple = true;
+    input.hidden = true;
+    input.onchange = () => { resolve([...input.files]); input.remove(); };
+    input.addEventListener('cancel', () => { resolve([]); input.remove(); });
+    document.body.append(input);
+    input.click();
+  });
+}
+
+async function installModels(kind) {
+  if (modelTask) return;
+  let run;
+  if (kind === 'files') {
+    const files = await pickFiles('.onnx,.json');
+    if (!files.length) return;
+    run = (opts) => installFromFiles(files, opts);
+  } else {
+    const url = prompt('URL of a model’s .json manifest (its .onnx must sit next to it, and the server must allow CORS):');
+    if (!url?.trim()) return;
+    run = (opts) => installFromUrl(url.trim(), opts);
+  }
+  const controller = new AbortController();
+  modelTask = { controller, text: 'Installing…' };
+  buildModelsSection();
+  try {
+    await run({
+      signal: controller.signal,
+      onProgress: (p, m) => {
+        if (!modelTask) return;
+        modelTask.text = `Installing ${m.name}… ${Math.round(p * 100)}%`;
+        const node = document.getElementById('model-status');
+        if (node) node.textContent = modelTask.text;
+      },
+    });
+  } catch (err) {
+    if (err.name !== 'AbortError') {
+      console.error(err);
+      alert(`Model install failed:\n${err.message}`);
+    }
+  }
+  modelTask = null;
+  await refreshModels();
+}
+
+function buildModelsSection() {
+  const wrap = $('model-opts');
+  if (!wrap) return;
+  wrap.replaceChildren();
+  const note = (text) => {
+    const p = document.createElement('p');
+    p.className = 'panel-note';
+    p.textContent = text;
+    wrap.append(p);
+    return p;
+  };
+  if (!opfsAvailable()) {
+    note('This browser can’t store separation models.');
+    return;
+  }
+  const row = (text, ...nodes) => {
+    const r = document.createElement('span');
+    r.className = 'display-row sync-recording';
+    r.append(text, ...nodes);
+    wrap.append(r);
+    return r;
+  };
+  const button = (text, onclick, title = '') => {
+    const b = document.createElement('button');
+    b.className = 'btn small';
+    b.textContent = text;
+    b.title = title;
+    b.onclick = onclick;
+    return b;
+  };
+  for (const [role, label] of Object.entries(ROLES)) {
+    const m = modelState?.[role];
+    const name = document.createElement('span');
+    name.className = 'sync-file';
+    name.textContent = modelState ? (m ? `${m.manifest.name} (${fmtSize(m.size)})` : 'Not installed') : '…';
+    name.title = m ? `${m.manifest.stems.join(', ')} · ${m.manifest.sampleRate} Hz` : '';
+    const actions = document.createElement('span');
+    if (m && !modelTask) {
+      actions.append(button('Remove', async () => {
+        if (!confirm(`Remove the ${label.toLowerCase()} (${m.manifest.name})?`)) return;
+        await removeModel(role);
+        await refreshModels();
+      }));
+    }
+    row(label, name, actions);
+  }
+  const actions = document.createElement('span');
+  if (modelTask) {
+    actions.append(button('Cancel', () => modelTask?.controller.abort()));
+  } else {
+    actions.append(
+      button('Import files…', () => installModels('files'), 'Pick a model’s .onnx and .json files (both models at once is fine).'),
+      button('From URL…', () => installModels('url'), 'Download a model from the URL of its .json manifest.'),
+    );
+  }
+  row('Add', actions);
+  const status = note(modelTask?.text || '');
+  status.id = 'model-status';
+  if (!modelTask) {
+    note('Models made from Music-Source-Separation-Training checkpoints with tools/msst-onnx/export.py (see its README). ' +
+      'They stay in this browser. ' + (navigator.gpu ? 'Runs on the GPU (WebGPU).' : 'No WebGPU here: separation runs on the CPU and is slow.'));
+  }
+  if (!modelState) refreshModels();
+}
+
 
 // ---- automatic alignment ----
 
@@ -1812,6 +2076,36 @@ function buildSyncSection() {
       if (sync.pins?.length) pinActions.append(button('Clear', () => applySync({ pins: [] }), 'Forget the pinned measures (keeps the current timing).'));
       row('Pins', pinActions).classList.add('sync-recording');
     }
+
+    const sepRunning = separating && separating.songId === current.song.id;
+    const sepActions = document.createElement('span');
+    if (sepRunning) {
+      sepActions.append(button('Cancel', () => separating?.controller.abort()));
+    } else if (sync.stems) {
+      const use = document.createElement('input');
+      use.type = 'checkbox';
+      use.checked = !!sync.stems.use;
+      use.onchange = () => {
+        const on = use.checked;
+        applySync((s) => (s.stems ? { stems: { ...s.stems, use: on }, kit: on ? false : s.kit } : null));
+      };
+      const useLabel = document.createElement('label');
+      useLabel.append(use, ' Use');
+      useLabel.title = 'Play the drumless backing track, with every drum note playing its own hit from the recording.';
+      sepActions.append(useLabel, button('Remove', removeStems, 'Delete the separated stems of this song.'));
+    } else {
+      const b = button('Separate drums', separateDrums,
+        'Split the recording into a drumless backing track and drum keysounds, in this browser.');
+      b.disabled = !modelsReady() || !!separating;
+      sepActions.append(b);
+    }
+    row('Drum stems', sepActions).classList.add('sync-recording');
+    const sepStatus = document.createElement('span');
+    sepStatus.id = 'sync-sep-status';
+    sepStatus.className = 'sync-status';
+    sepStatus.textContent = separateStatusText(sync);
+    wrap.append(sepStatus);
+    if (!modelState) refreshModels();
   }
 }
 
@@ -1959,6 +2253,7 @@ function buildFeetSection() {
 function openSettingsPanel() {
   buildPlaybackSection();
   buildSyncSection();
+  buildModelsSection();
   buildLaneOrderList();
   buildNoteColorList();
   buildDisplayOpts();
