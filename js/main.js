@@ -1697,10 +1697,11 @@ async function separateDrums() {
     const { separateRecording, STEM_DIR } = await import('./separate.js');
     const res = await separateRecording(buffer, {
       signal: controller.signal,
-      onProgress: (p, phase) => {
+      onProgress: (p, phase, stats) => {
         if (!separating) return;
         separating.progress = p;
-        if (phase) separating.phase = phase;
+        if (phase) { separating.phase = phase; separating.stats = ''; }
+        if (stats) separating.stats = stats;
         updateSeparateStatus();
       },
     });
@@ -1751,10 +1752,11 @@ function removeStems() {
 
 function separateStatusText(sync) {
   if (separating && separating.songId === current?.song.id) {
-    const { progress, phase, t0 } = separating;
+    const { progress, phase, t0, stats } = separating;
     let text = `${phase}… ${Math.round(progress * 100)}%`;
     const elapsed = (performance.now() - t0) / 1000;
     if (progress > 0.03 && elapsed > 5) text += ` · about ${fmtTime((elapsed / progress) * (1 - progress) + 30)} left`;
+    if (stats) text += ` · ${stats}`;
     return text;
   }
   const st = sync.stems;

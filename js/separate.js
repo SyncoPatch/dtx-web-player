@@ -39,8 +39,8 @@ export async function separateRecording(buffer, { onProgress, signal } = {}) {
       worker.terminate();
     };
     worker.onmessage = (e) => {
-      const { progress, phase, result, error } = e.data;
-      if (progress !== undefined) { onProgress?.(progress, phase); return; }
+      const { progress, phase, stats, result, error } = e.data;
+      if (progress !== undefined) { onProgress?.(progress, phase, stats); return; }
       finish();
       if (error) reject(new Error(error));
       else resolve(result);

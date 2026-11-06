@@ -58,11 +58,26 @@ const ON = { webgpu: 'on the GPU', wasm: 'on the CPU, slow' };
 let phaseLabel = '';
 
 let lastPct = -1;
-function report(progress, phase) {
+function report(progress, phase, stats) {
   const pct = Math.floor(progress * 1000);
-  if (pct === lastPct && !phase) return;
+  if (pct === lastPct && !phase && !stats) return;
   lastPct = pct;
-  self.postMessage({ progress, phase });
+  self.postMessage({ progress, phase, stats });
+}
+
+// Per-pass timing: wall time per chunk (model + chunk bookkeeping + encoding)
+// next to the model's share, shown in the progress line.
+let timing = null;
+function startTiming() {
+  timing = { t0: performance.now(), model: 0, chunks: 0 };
+}
+function chunkDone(progress) {
+  timing.chunks++;
+  const wall = (performance.now() - timing.t0) / 1000 / timing.chunks;
+  const model = timing.model / 1000 / timing.chunks;
+  const stats = `${wall.toFixed(1)} s per chunk (model ${model.toFixed(1)} s)`;
+  if (timing.chunks % 10 === 1) console.info(`separation: chunk ${timing.chunks}, ${stats}`);
+  report(progress, undefined, stats);
 }
 
 async function roleDir(role, create = false) {
@@ -152,7 +167,9 @@ async function openSession(ort, role) {
   const h = { session, manifest, backend, run: null };
   const once = async (input) => {
     const feeds = { [h.session.inputNames[0]]: new ort.Tensor('float32', input, [1, 2, C]) };
+    const t = performance.now();
     const out = (await h.session.run(feeds))[h.session.outputNames[0]];
+    if (timing) timing.model += performance.now() - t;
     const data = out.data;
     if (data.length !== S * 2 * C) {
       throw new Error(`${manifest.name}: model returned ${data.length} values, expected ${S}×2×${C}.`);
@@ -191,6 +208,7 @@ async function separate({ mix, sampleRate }) {
   const backing = await makeEncoder(sampleRate, 2, BACKING_BPS);
   phaseLabel = 'Extracting drums';
   report(0, `${phaseLabel} (${ON[ex.backend]}${self.navigator.gpu ? '' : ': no WebGPU in workers here'})`);
+  startTiming();
   await demix(mix, ex.manifest, ex.run, {
     onOutput(pos, blocks) {
       const [l, r] = blocks[di];
@@ -204,7 +222,7 @@ async function separate({ mix, sampleRate }) {
       }
       backing.push([bl, br]);
     },
-    onProgress: (p) => report(0.5 * p),
+    onProgress: (p) => chunkDone(0.5 * p),
   });
   await ex.session.release();
   const files = { nodrums: await backing.finish() };
@@ -222,6 +240,7 @@ async function separate({ mix, sampleRate }) {
   }
   phaseLabel = 'Splitting drums';
   report(0.5, `${phaseLabel} (${ON[sp.backend]})`);
+  startTiming();
   await demix(drums, sp.manifest, sp.run, {
     onOutput(pos, blocks) {
       blocks.forEach(([l, r], s) => {
@@ -232,7 +251,7 @@ async function separate({ mix, sampleRate }) {
         enc.push([mono]);
       });
     },
-    onProgress: (p) => report(0.5 + 0.5 * p),
+    onProgress: (p) => chunkDone(0.5 + 0.5 * p),
   });
   await sp.session.release();
   report(1, 'Encoding');
