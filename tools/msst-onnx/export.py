@@ -152,9 +152,11 @@ class MDXRealSTFT:
         batch_dims = x.shape[:-3]
         c, f, t = x.shape[-3:]
         n = self.n_fft // 2 + 1
-        pad = torch.zeros(*batch_dims, c, n - f, t, dtype=x.dtype, device=x.device)
-        x = torch.cat([x, pad], -2)
-        x = x.reshape(-1, 2, n, t)
+        # Reshape to rank 4 first, then zero-pad the frequency axis. (The
+        # original concatenates zeros on a rank-5 tensor; onnxruntime-web's
+        # WebGPU Concat shader for rank > 4 fails to compile in Firefox.)
+        x = x.reshape(-1, 2, f, t)
+        x = F.pad(x, (0, 0, 0, n - f))
         y = self.conv.inverse(x)
         return y.reshape(*batch_dims, 2, -1)
 
