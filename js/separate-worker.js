@@ -4,16 +4,54 @@
 //      streams a model into OPFS (models/<role>/), then writes its manifest
 //      with { complete: true, bytes } so half-written installs are ignored.
 //  { cmd: 'separate', mix: [Float32Array, Float32Array], sampleRate }
-//      pass 1: drums extractor -> drum stem; backing = mix - drums (FLAC, stereo)
-//      pass 2: drum splitter on the drum stem -> one mono FLAC per component
+//      pass 1: drums extractor -> drum stem; backing = mix - drums (stereo)
+//      pass 2: drum splitter on the drum stem -> one mono file per component
 //      replies { result: { files: { nodrums, kick, snare, … }: Blob, backend, seconds } }
+//      Each stem is encoded as Ogg Opus and as FLAC in the same pass, and
+//      the smaller file is kept: Opus wins on dense audio, while FLAC can
+//      beat Opus' fixed bitrate on a nearly silent stem.
 //
 // Progress is posted as { progress, phase }; failures as { error }.
 // Cancelling = the page terminates this worker.
 
 import { demix } from './separate-core.js';
 import { FlacEncoder } from './flac.js';
+import { OpusOggEncoder } from './ogg.js';
 import { canonicalStem } from './models.js';
+
+// Opus bitrates (bits/s): the stereo backing track, the mono drum stems.
+const BACKING_BPS = 160000;
+const STEM_BPS = 96000;
+
+class StemEncoder {
+  constructor(sampleRate, channels, opusBps) {
+    this.flac = new FlacEncoder(sampleRate, channels);
+    this.opus = opusBps ? new OpusOggEncoder(sampleRate, channels, opusBps) : null;
+  }
+
+  push(chans) {
+    this.flac.push(chans);
+    if (this.opus) {
+      try { this.opus.push(chans); } catch (err) { console.warn('Opus encoding failed:', err); this.opus = null; }
+    }
+  }
+
+  async finish() {
+    const flac = this.flac.finish();
+    if (!this.opus) return flac;
+    try {
+      const ogg = await this.opus.finish();
+      return ogg.size < flac.size ? ogg : flac;
+    } catch (err) {
+      console.warn('Opus encoding failed:', err);
+      return flac;
+    }
+  }
+}
+
+async function makeEncoder(sampleRate, channels, bps) {
+  return new StemEncoder(sampleRate, channels, (await OpusOggEncoder.supported(channels, bps)) ? bps : 0);
+}
 
 let lastPct = -1;
 function report(progress, phase) {
@@ -130,7 +168,7 @@ async function separate({ mix, sampleRate }) {
   const n = mix[0].length;
   const drums = [new Float32Array(n), new Float32Array(n)];
   const di = ex.manifest.stems.indexOf('drums');
-  const backing = new FlacEncoder(sampleRate, 2);
+  const backing = await makeEncoder(sampleRate, 2, BACKING_BPS);
   report(0, 'Extracting drums');
   await demix(mix, ex.manifest, ex.run, {
     onOutput(pos, blocks) {
@@ -148,7 +186,7 @@ async function separate({ mix, sampleRate }) {
     onProgress: (p) => report(0.5 * p),
   });
   await ex.session.release();
-  const files = { nodrums: backing.finish() };
+  const files = { nodrums: await backing.finish() };
   mix = null;
 
   // Pass 2: split the drum stem into components (mono keysound sources).
@@ -157,7 +195,10 @@ async function separate({ mix, sampleRate }) {
     throw new Error('The two models use different sample rates; export both at the same rate.');
   }
   const names = sp.manifest.stems.map(canonicalStem);
-  const encoders = names.map((name, i) => (name && names.indexOf(name) === i ? new FlacEncoder(sampleRate, 1) : null));
+  const encoders = [];
+  for (let i = 0; i < names.length; i++) {
+    encoders.push(names[i] && names.indexOf(names[i]) === i ? await makeEncoder(sampleRate, 1, STEM_BPS) : null);
+  }
   report(0.5, 'Splitting drums');
   await demix(drums, sp.manifest, sp.run, {
     onOutput(pos, blocks) {
@@ -172,7 +213,8 @@ async function separate({ mix, sampleRate }) {
     onProgress: (p) => report(0.5 + 0.5 * p),
   });
   await sp.session.release();
-  encoders.forEach((enc, s) => { if (enc) files[names[s]] = enc.finish(); });
+  report(1, 'Encoding');
+  for (let s = 0; s < encoders.length; s++) if (encoders[s]) files[names[s]] = await encoders[s].finish();
 
   const backend = ex.backend === sp.backend ? ex.backend : `${ex.backend}+${sp.backend}`;
   self.postMessage({

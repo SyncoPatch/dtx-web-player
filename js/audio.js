@@ -90,8 +90,8 @@ export class SoundBank {
   }
 
   // Decode one file: XA with our own decoder, everything else natively,
-  // falling back to the vendored Vorbis decoder for OGG data the browser
-  // rejects (Safari).
+  // falling back for OGG data the browser rejects (Safari): Opus (separated
+  // stems) through WebCodecs, Vorbis through the vendored decoder.
   async _decodeUncached(blob) {
     const data = await blob.arrayBuffer();
     if (isXA(data)) {
@@ -105,6 +105,8 @@ export class SoundBank {
     } catch (err) {
       const raw = await blob.arrayBuffer(); // decodeAudioData detached the first copy
       if (raw.byteLength >= 4 && isOgg(raw)) {
+        const { isOggOpus, decodeOggOpus } = await import('./ogg.js');
+        if (isOggOpus(raw)) return decodeOggOpus(this.ctx, raw);
         return decodeVorbis(this.ctx, raw);
       }
       throw err;

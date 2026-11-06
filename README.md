@@ -65,7 +65,9 @@ browsers may cache files — hard-reload (Cmd+Shift+R) after updating.
   re-alignment and shifts; align the chart first. The models aren't shipped:
   convert them once with [`tools/msst-onnx`](tools/msst-onnx/README.md) and add
   them under **Separation models** in Settings (stored in the browser's
-  private file storage). Stems are saved with the song as FLAC.
+  private file storage). Stems are saved with the song as Ogg Opus, or FLAC where
+  that comes out smaller (nearly silent stems): at most about 5 MB for the
+  backing track plus 3 MB per drum stem for a 4-minute song.
 - **Import URL** — download and import a ZIP directly from a URL. The hosting
   server must allow cross-origin requests (CORS); if it doesn't, download the
   file and use Import ZIP instead.

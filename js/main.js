@@ -1708,12 +1708,18 @@ async function separateDrums() {
     const files = {};
     const putFiles = [];
     for (const [name, blob] of Object.entries(res.files)) {
-      const path = STEM_DIR + name + '.flac';
+      const path = STEM_DIR + name + (blob.type === 'audio/ogg' ? '.ogg' : '.flac');
       files[name] = path;
       putFiles.push({ path, origPath: path, blob });
     }
     const stems = {
-      files, models: res.models, backend: res.backend, seconds: Math.round(res.seconds), at: Date.now(), use: true,
+      files,
+      models: res.models,
+      backend: res.backend,
+      seconds: Math.round(res.seconds),
+      bytes: putFiles.reduce((a, f) => a + f.blob.size, 0),
+      at: Date.now(),
+      use: true,
     };
     if (current?.song.id === song.id) {
       const old = stemPaths(currentSync()).filter((p) => !Object.values(files).includes(p));
@@ -1753,7 +1759,8 @@ function separateStatusText(sync) {
   }
   const st = sync.stems;
   if (st) {
-    const how = `Separated with ${st.models.join(' + ')} (${st.backend}, ${fmtTime(st.seconds)}).`;
+    const size = st.bytes ? `, ${fmtSize(st.bytes)}` : '';
+    const how = `Separated with ${st.models.join(' + ')} (${st.backend}, ${fmtTime(st.seconds)}${size}).`;
     if (!st.use) return `${how} Off: the full recording plays.`;
     let text = `${how} The recording plays without its drums, and every drum note plays its own hit from it.`;
     if (!sync.barTimes && !sync.align) text += ' Align the chart first so each note finds its hit.';
