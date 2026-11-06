@@ -1,6 +1,7 @@
 // App wiring: import (ZIP / folder), persisted song list, playback screen.
 
 import { extractZip } from './zip.js';
+import { createZip } from './zipwrite.js';
 import { parseDTX, parseSetDef, decodeText } from './dtx.js';
 import { listSongs, addSong, updateSong, deleteSong, getSongFiles, listSkins, addSkin, deleteSkin } from './db.js';
 import { Player, NOTE_TYPES, LANE_IDS, GROUP_RULES, defaultColors, defaultDisplay } from './player.js';
@@ -227,7 +228,7 @@ async function importEntries(fallbackTitle, totalSize, entries) {
   // Read chart headers for titles/levels.
   const dtxs = [];
   for (const f of dtxFiles) {
-    let h = { title: '', level: null, bpm: null };
+    let h = { title: '', artist: '', level: null, bpm: null };
     try {
       h = parseDTX(decodeText(await f.blob.arrayBuffer()), { headersOnly: true });
     } catch { /* keep placeholder */ }
@@ -237,6 +238,7 @@ async function importEntries(fallbackTitle, totalSize, entries) {
       label: '',
       level: h.level,
       bpm: h.bpm,
+      artist: h.artist,
     });
   }
 
@@ -257,10 +259,13 @@ async function importEntries(fallbackTitle, totalSize, entries) {
   }
 
   dtxs.sort((a, b) => (a.level ?? 999) - (b.level ?? 999));
+  const artist = dtxs.find((d) => d.artist)?.artist || '';
+  for (const d of dtxs) delete d.artist;
 
   const song = {
     id: crypto.randomUUID(),
     title: songTitle || dtxs[0].title || fallbackTitle,
+    artist,
     dtxs,
     addedAt: Date.now(),
     size: totalSize,
@@ -348,6 +353,7 @@ async function importGuitarPro(file, feetOpts = {}) {
   const song = {
     id: crypto.randomUUID(),
     title: gp.title || file.name.replace(/\.[^.]+$/, ''),
+    artist: gp.artist || '',
     dtxs,
     addedAt: Date.now(),
     size: files.reduce((a, f) => a + f.blob.size, 0),
@@ -486,6 +492,7 @@ async function importFolder(fileList) {
 
 async function renderSongList() {
   const songs = await listSongs();
+  const needArtist = [];
   el.songList.replaceChildren();
   el.emptyHint.hidden = songs.length > 0;
 
@@ -519,6 +526,13 @@ async function renderSongList() {
     };
     head.append(title, menuBtn, del);
 
+    const info = document.createElement('div');
+    info.className = 'song-info';
+    info.textContent = songInfoText(song);
+    info.title = info.textContent;
+    info.hidden = !info.textContent;
+    if (song.artist === undefined) needArtist.push([song, info]);
+
     const meta = document.createElement('div');
     meta.className = 'song-meta';
     const kind = song.source === 'guitarpro' ? (song.sync?.audio ? 'Guitar Pro + recording · ' : 'Guitar Pro · ') : '';
@@ -543,8 +557,43 @@ async function renderSongList() {
       charts.append(btn);
     }
 
-    li.append(head, meta, charts);
+    li.append(head, info, meta, charts);
     el.songList.append(li);
+  }
+  backfillArtists(needArtist);
+}
+
+const fmtBpm = (b) => String(Math.round(b * 100) / 100);
+
+// "Artist · BPM 140" (or a range when the charts disagree).
+function songInfoText(song) {
+  const bits = [];
+  if (song.artist) bits.push(song.artist);
+  const bpms = song.dtxs.map((d) => d.bpm).filter((b) => Number.isFinite(b) && b > 0);
+  if (bpms.length) {
+    const lo = Math.min(...bpms), hi = Math.max(...bpms);
+    bits.push(Math.abs(hi - lo) < 0.005 ? `BPM ${fmtBpm(lo)}` : `BPM ${fmtBpm(lo)}–${fmtBpm(hi)}`);
+  }
+  return bits.join(' · ');
+}
+
+// Songs imported before artists were stored: read it from the first chart's
+// header once, save it, and fill the card in place.
+async function backfillArtists(list) {
+  for (const [song, info] of list) {
+    try {
+      const files = await getSongFiles(song.id);
+      const blob = files.find((f) => f.path === song.dtxs[0]?.path)?.blob;
+      let artist = '';
+      if (blob) artist = parseDTX(decodeText(await blob.arrayBuffer()), { headersOnly: true }).artist || '';
+      song.artist = artist;
+      await updateSong(song);
+      info.textContent = songInfoText(song);
+      info.title = info.textContent;
+      info.hidden = !info.textContent;
+    } catch (err) {
+      console.warn('artist backfill failed', song.id, err);
+    }
   }
 }
 
@@ -564,6 +613,17 @@ function showCardMenu(btn, song) {
   const menu = document.createElement('div');
   menu.className = 'card-menu';
   menu.dataset.songId = song.id;
+  const zipItem = document.createElement('button');
+  zipItem.className = 'card-menu-item';
+  zipItem.textContent = 'Export ZIP';
+  zipItem.title = song.source === 'guitarpro'
+    ? 'Download the generated DTX charts with their sounds, recording and the original Guitar Pro file'
+    : 'Download this song as a DTX package';
+  zipItem.onclick = () => {
+    closeCardMenu();
+    exportSongZip(song);
+  };
+  menu.append(zipItem);
   for (const d of song.dtxs) {
     const name = d.label || d.title || basename(d.path);
     const view = document.createElement('button');
@@ -588,6 +648,42 @@ function showCardMenu(btn, song) {
   menu.style.left = `${Math.max(8, Math.min(r.left, window.innerWidth - 250))}px`;
   document.body.append(menu);
   openMenu = menu;
+}
+
+const safeFileName = (s, fallback) => (s || '').replace(/[\\/:*?"<>|]+/g, '_').trim().slice(0, 120) || fallback;
+
+function downloadBlob(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.append(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 30000);
+}
+
+// The song's stored files under one top folder, re-importable via Import ZIP.
+async function exportSongZip(song) {
+  try {
+    showOverlay('Building ZIP…');
+    const folder = safeFileName(song.title, 'song');
+    const files = await getSongFiles(song.id);
+    if (!files.length) throw new Error('No files stored for this song.');
+    // Generated Guitar Pro charts reference the stored paths (a recording's
+    // origPath is the user's file name), so use those; DTX packages keep
+    // their original names and case.
+    const gp = song.source === 'guitarpro';
+    const blob = await createZip(files.map((f) => ({
+      name: `${folder}/${((gp ? f.path : f.origPath) || f.path).replace(/^\/+/, '')}`,
+      blob: f.blob,
+    })));
+    downloadBlob(blob, `${folder}.zip`);
+  } catch (err) {
+    console.error(err);
+    alert(`Failed to export ZIP:\n${err.message}`);
+  }
+  hideOverlay();
 }
 
 document.addEventListener('pointerdown', (e) => {
@@ -1103,9 +1199,11 @@ const STEPPER_DEFS = {
   },
 };
 
-// A −/+ stepper with press-and-hold repeat.
+// A −/+ stepper with press-and-hold repeat; the value is also a text box
+// that takes any number in range (not snapped to the step).
 function makeStepper(key) {
   const { min, max, step, fmt, get, apply: applyValue, enabled } = STEPPER_DEFS[key];
+  const decimals = STEPPER_DEFS[key].decimals ?? (step < 1 ? 2 : 0);
 
   const root = document.createElement('span');
   root.className = 'stepper';
@@ -1117,19 +1215,24 @@ function makeStepper(key) {
   };
   const down = mkBtn('−');
   const up = mkBtn('+');
-  const val = document.createElement('span');
+  const val = document.createElement('input');
+  val.type = 'text';
+  val.inputMode = decimals ? 'decimal' : 'numeric';
   val.className = 'stepper-val';
+  val.autocomplete = 'off';
+  val.spellcheck = false;
 
   const stepper = {
     el: root,
     refresh() {
       if (enabled && !enabled()) {
-        val.textContent = '—';
-        down.disabled = up.disabled = true;
+        val.value = '—';
+        down.disabled = up.disabled = val.disabled = true;
         return;
       }
+      val.disabled = false;
       const v = get();
-      val.textContent = fmt(v);
+      if (document.activeElement !== val) val.value = fmt(v);
       down.disabled = v <= min + 1e-9;
       up.disabled = v >= max - 1e-9;
     },
@@ -1140,10 +1243,38 @@ function makeStepper(key) {
     v = Math.max(min, Math.min(max, +v.toFixed(4)));
     if (v !== get()) applyValue(v);
   };
+  // Typed entry: focus shows the bare number; Enter or leaving commits,
+  // Escape reverts. Anything unparsable reverts too.
+  val.addEventListener('focus', () => {
+    val.value = String(+get().toFixed(decimals));
+    val.select();
+  });
+  const commit = () => {
+    const n = parseFloat(val.value.replace(/[x×\s]|ms/gi, '').replace(',', '.'));
+    if (Number.isFinite(n) && !(enabled && !enabled())) {
+      const v = Math.max(min, Math.min(max, +n.toFixed(decimals)));
+      if (v !== get()) applyValue(v);
+    }
+    stepper.refresh();
+  };
+  val.addEventListener('blur', commit);
+  val.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      val.blur(); // commits
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      e.stopPropagation(); // don't close the panel / leave the player
+      val.value = String(+get().toFixed(decimals));
+      val.blur();
+    }
+  });
+
   for (const [btn, d] of [[down, -1], [up, 1]]) {
     let holdTimer = 0, repeatTimer = 0;
     btn.addEventListener('pointerdown', (e) => {
       e.preventDefault();
+      if (document.activeElement === val) val.blur(); // commit typed text first
       bump(d);
       holdTimer = setTimeout(() => { repeatTimer = setInterval(() => bump(d), 80); }, 400);
     });

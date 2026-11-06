@@ -1,7 +1,7 @@
 // App-shell service worker: cache-first for the static shell so the app
 // loads offline (songs already live in IndexedDB). Bump VERSION on deploys
 // that change any shell file.
-const VERSION = 'dtx-shell-v11';
+const VERSION = 'dtx-shell-v12';
 // onnxruntime's 25 MB wasm is cached on first use instead of with the shell,
 // in its own cache that survives shell updates (named by the vendored version).
 const ORT_CACHE = 'dtx-ort-1.29.0';
@@ -18,6 +18,7 @@ const SHELL = [
   './js/dtx.js',
   './js/db.js',
   './js/zip.js',
+  './js/zipwrite.js',
   './js/stretch.js',
   './js/stretch-worker.js',
   './js/pdf.js',

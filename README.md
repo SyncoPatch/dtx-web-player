@@ -73,7 +73,12 @@ browsers may cache files — hard-reload (Cmd+Shift+R) after updating.
   file and use Import ZIP instead.
 - **Import Folder** — same, but from an unzipped song folder.
 - Imported songs are stored in the browser (IndexedDB), so they persist across
-  visits on the same device. Delete them per-song from the list.
+  visits on the same device. Each card shows the artist and BPM. Delete them
+  per-song from the list.
+- **Export ZIP** (a card's ⋯ menu) — downloads the song as a ZIP that plays in
+  DTXMania and re-imports here. Guitar Pro songs export their generated charts
+  with the kit sounds, recording, stems and the original Guitar Pro file;
+  re-imported, they become plain DTX songs (no re-alignment or foot editing).
 - Click a difficulty chip to play. Controls: play/pause (Space), restart, seek;
   Esc returns to the song list.
 
@@ -81,7 +86,8 @@ browsers may cache files — hard-reload (Cmd+Shift+R) after updating.
 
 All settings live in a **Settings** panel available from both the library
 screen and the player screen; the player's bottom bar keeps quick controls.
-Scroll and play speed are adjusted with −/+ steppers (hold to repeat).
+Scroll, play speed and offsets are adjusted with −/+ steppers (hold to
+repeat), or click the value and type any number in range.
 
 - **Scroll** (0.25x–10x, 0.25 steps) — visual note-scroll speed.
 - **Play speed** (0.25x–2x, 0.05 steps) — actual playback tempo with **pitch-preserving
