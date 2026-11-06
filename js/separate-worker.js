@@ -145,16 +145,31 @@ async function openSession(ort, role) {
   }
   const C = manifest.chunk;
   const S = manifest.stems.length;
-  const run = async (input) => {
-    const feeds = { [session.inputNames[0]]: new ort.Tensor('float32', input, [1, 2, C]) };
-    const out = (await session.run(feeds))[session.outputNames[0]];
+  const h = { session, manifest, backend, run: null };
+  const once = async (input) => {
+    const feeds = { [h.session.inputNames[0]]: new ort.Tensor('float32', input, [1, 2, C]) };
+    const out = (await h.session.run(feeds))[h.session.outputNames[0]];
     const data = out.data;
     if (data.length !== S * 2 * C) {
       throw new Error(`${manifest.name}: model returned ${data.length} values, expected ${S}×2×${C}.`);
     }
     return data;
   };
-  return { session, manifest, backend, run };
+  // A WebGPU session can be created and still fail on its first run (e.g. a
+  // shader the browser can't compile): fall back to WASM and retry.
+  h.run = async (input) => {
+    try {
+      return await once(input);
+    } catch (err) {
+      if (h.backend !== 'webgpu') throw err;
+      console.warn('WebGPU run failed, falling back to WASM:', err);
+      await h.session.release().catch(() => {});
+      h.session = await ort.InferenceSession.create(bytes, { executionProviders: ['wasm'], graphOptimizationLevel: 'all' });
+      h.backend = 'wasm';
+      return once(input);
+    }
+  };
+  return h;
 }
 
 async function separate({ mix, sampleRate }) {
