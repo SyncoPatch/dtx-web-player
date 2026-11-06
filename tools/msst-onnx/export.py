@@ -198,6 +198,22 @@ def patch_htdemucs(model, config):
         B, S, C, Fr, T = m.shape
         return m.view(B, S, -1, 2, Fr, T)
 
+    # The transformer's positional embeddings depend only on fixed sizes, but
+    # tracing records their arange/pow/cos math, including a Cos in a dtype
+    # onnxruntime has no kernel for. Going through numpy makes the tracer
+    # store the result as a constant instead.
+    import demucs.transformer as dt
+
+    def as_constant(fn):
+        def wrapped(*args, **kwargs):
+            out = fn(*args, **kwargs)
+            return torch.from_numpy(out.detach().cpu().float().numpy().copy()).to(out.device)
+        return wrapped
+
+    for name in ('create_sin_embedding', 'create_2d_sin_embedding', 'create_sin_embedding_cape'):
+        if hasattr(dt, name):
+            setattr(dt, name, as_constant(getattr(dt, name)))
+
     mod.spectro, mod.ispectro = spectro, ispectro
     model._magnitude = types.MethodType(_magnitude, model)
     model._mask = types.MethodType(_mask, model)
