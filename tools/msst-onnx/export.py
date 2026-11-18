@@ -25,7 +25,7 @@ https://github.com/ZFTurbo/Music-Source-Separation-Training):
         --checkpoint f7e0c4bc-ba3fe64a.th --role drums --out htdemucs-ft-drums
 
     python export.py --msst ~/src/MSST --model-type mdx23c \\
-        --config aufr33-jarredou_DrumSep_model_mdx23c_ep_141_sdr_10.8059.yaml \\
+        --config config_drumsep_mdx23c.yaml \\
         --checkpoint aufr33-jarredou_DrumSep_model_mdx23c_ep_141_sdr_10.8059.ckpt \\
         --role drumsep --out drumsep-mdx23c-6
 
