@@ -8,9 +8,13 @@ on:
 permissions:
   contents: write
 
-# Serialize all writes to the gh-pages branch (shared with the PR-preview workflow)
+# Production deploys queue among themselves only. GitHub keeps one pending run
+# per concurrency group, so sharing a group with the PR-preview workflow let a
+# preview cleanup (which runs when a PR is merged) cancel the pending
+# production deploy. A newer deploy replacing an older pending one is fine:
+# it publishes the newer main.
 concurrency:
-  group: gh-pages-deploy
+  group: pages-production
   cancel-in-progress: false
 
 jobs:
@@ -20,11 +24,29 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Publish to gh-pages
+        id: publish
+        continue-on-error: true
         uses: peaceiris/actions-gh-pages@v4
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           publish_dir: .
           publish_branch: gh-pages
           # Preserve pr-preview/ subfolders created by open PRs
+          keep_files: true
+          exclude_assets: '.github,serve.py,tests'
+
+      # A preview update can push to gh-pages at the same moment; the push is
+      # then rejected. Wait and publish again (it re-fetches gh-pages).
+      - name: Retry after a gh-pages push race
+        if: steps.publish.outcome == 'failure'
+        run: sleep 20
+
+      - name: Publish to gh-pages (retry)
+        if: steps.publish.outcome == 'failure'
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: .
+          publish_branch: gh-pages
           keep_files: true
           exclude_assets: '.github,serve.py,tests'
