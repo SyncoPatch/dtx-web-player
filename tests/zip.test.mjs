@@ -1,4 +1,4 @@
-// node --test tests/   (Node 20+; fixtures are built with python3's zipfile)
+// node --test tests/*.test.mjs   (Node 20+; fixtures are built with python3's zipfile)
 import { test, before } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
