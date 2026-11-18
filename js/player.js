@@ -7,6 +7,7 @@
 
 import { SoundBank } from './audio.js';
 import { Stretcher } from './stretch.js';
+import { assignSlices } from './stemslice.js';
 
 // Note types the user can color independently. Colors are kept per type even
 // when lanes are grouped, so e.g. RD chips stay distinguishable on the CY lane.
@@ -118,6 +119,7 @@ export const TAB_XHEAD = new Set([0x1A, 0x16, 0x11, 0x18, 0x19, 0x1B]); // cymba
 const TAB_PPS = 150;     // horizontal px/second at scroll speed 1.0
 const TAB_GAP = 12;      // staff line spacing
 const TAB_STRIP_H = 170; // height of the tab strip above/below the lanes
+const EDITABLE_CH = new Set([0x11, 0x18, 0x13, 0x1B, 0x1C]); // HH, BD, LP, LBD
 
 const LOOKAHEAD = 0.35;   // real seconds of audio scheduled ahead
 const TICK_MS = 60;       // scheduler interval
@@ -173,6 +175,7 @@ export class Player {
     this.bank = new SoundBank(this.ctx);
     this.stretcher = new Stretcher();
     this._stretched = new Map(); // wavId -> stretched AudioBuffer (playSpeed != 1)
+    this._stretchCache = new WeakMap(); // source AudioBuffer -> { speed, buffer }, latest speed only
     this._stretchGen = 0;
     this._chartEnd = 0;
 
@@ -217,12 +220,15 @@ export class Player {
     this._sources = new Set();
     this._activeByWav = new Map();
     this._activeHH = new Map();
+    this._stems = null; // { name: AudioBuffer } separated drum stems, or null
 
     this.onFrame = null; // (player) called every rendered frame
     this.onEnded = null;
     this.onStretchProgress = null; // (0..1) while preparing time-stretch
     this.onLoopChange = null; // (loop | null) after loop edits
     this.onTabZoom = null; // (zoom) after wheel/pinch zoom on the strip
+    this.editFeet = false; // paused taps on foot / hi-hat notes edit them
+    this.onChipEdit = null; // (chip) a tapped note in edit mode
 
     // Tab strip interactions.
     // Mouse: click seeks / toggles the loop region; drag (paused) paints a
@@ -307,7 +313,8 @@ export class Player {
       if (!d) {
         if (e.pointerType !== 'touch') {
           canvas.style.cursor = inStrip(e)
-            ? (this._loopEdgeAt(e.offsetX) ? 'ew-resize' : 'pointer')
+            ? (this._loopEdgeAt(e.offsetX) ? 'ew-resize'
+              : this._editChipAt(e.offsetX, e.offsetY) ? 'crosshair' : 'pointer')
             : '';
         }
         return;
@@ -334,6 +341,11 @@ export class Player {
       if (!d) return;
       clearDrag();
       if (d.mode !== 'pending') return;
+      const chip = this._editChipAt(e.offsetX, e.offsetY);
+      if (chip) {
+        this.onChipEdit?.(chip);
+        return;
+      }
       // Plain click/tap: inside the loop region toggles it; elsewhere seeks
       // to the start of the clicked measure.
       const t = this._tabTimeAt(e.offsetX);
@@ -469,7 +481,24 @@ export class Player {
     this._rebuildLanes();
     this._buildTab();
     await this._prepareStretched(); // also computes this.duration
+    this._stems = null;
     return result;
+  }
+
+  // Separated drum stems ({ kick: AudioBuffer, … }, or null to stop using
+  // them): each drum chip then plays its own hit, sliced from its stem at
+  // the chip's place in the recording, which starts at song time bgmTime.
+  // Call after load(). Returns the number of chips that got a slice.
+  setStemKeysounds(stems, bgmTime = 0) {
+    this.stopAudio();
+    this._stems = stems;
+    if (!stems) {
+      for (const c of this.chips) delete c.slice;
+      return 0;
+    }
+    const data = {};
+    for (const [name, buf] of Object.entries(stems)) data[name] = { data: buf.getChannelData(0), sr: buf.sampleRate };
+    return assignSlices(this.chips, bgmTime, data);
   }
 
   async play() {
@@ -492,6 +521,11 @@ export class Player {
       const c = this.chips[i];
       if (c.time >= this.startOffset) break;
       this._schedIdx = i + 1;
+      if (c.slice) {
+        const offset = (this.startOffset - c.time) / this.playSpeed;
+        if (c.slice.len - offset > 0.05) this._playChip(c, this.ctxStart, offset);
+        continue;
+      }
       const s = this.bank.get(c.wav);
       if (!s) continue;
       const buffer = this._stretched.get(c.wav) || s.buffer;
@@ -563,6 +597,13 @@ export class Player {
     const newMap = new Map();
     let done = 0;
     for (const [id, buf] of targets) {
+      // Reloading the same recording at the same speed reuses its stretch.
+      const cached = this._stretchCache.get(buf);
+      if (cached && cached.speed === speed) {
+        newMap.set(id, cached.buffer);
+        done++;
+        continue;
+      }
       const channels = [];
       for (let ch = 0; ch < buf.numberOfChannels; ch++) channels.push(buf.getChannelData(ch).slice());
       const out = await this.stretcher.stretch(channels, buf.sampleRate, speed, (p) => {
@@ -572,6 +613,7 @@ export class Player {
       const nb = this.ctx.createBuffer(buf.numberOfChannels, out[0].length, buf.sampleRate);
       for (let ch = 0; ch < out.length; ch++) nb.copyToChannel(out[ch], ch);
       newMap.set(id, nb);
+      this._stretchCache.set(buf, { speed, buffer: nb });
       done++;
       this.onStretchProgress?.(done / targets.length);
     }
@@ -657,6 +699,28 @@ export class Player {
     const now = Math.min(this.time - this.offset, this.duration);
     const viewT = now + this._tabScroll;
     return viewT + (x - this._cssW * 0.25) / this._tabPps();
+  }
+
+  // In foot-edit mode: the editable note (kick, hi-hat or pedal) drawn
+  // nearest to (x, y) in the tab strip, or null.
+  _editChipAt(x, y) {
+    const r = this._tabRegion();
+    if (!this.editFeet || this.playing || !r) return null;
+    const staffTop = Math.round(r.top + 60);
+    const t = this._tabTimeAt(x);
+    const cols = this._tab.cols;
+    const reach = 9 / this._tabPps();
+    let best = null, bestD = Infinity;
+    for (let i = Math.max(0, lowerBound(cols, t - reach)); i < cols.length && cols[i].time <= t + reach; i++) {
+      const dx = this._tabXOf(cols[i].time) - x;
+      for (const n of [...cols[i].hands, ...cols[i].feet]) {
+        if (!EDITABLE_CH.has(n.ch)) continue;
+        const dy = staffTop + (n.p * TAB_GAP) / 2 - y;
+        const d = Math.hypot(dx, dy);
+        if (d < bestD && Math.abs(dy) <= TAB_GAP) { best = n.chip; bestD = d; }
+      }
+    }
+    return best;
   }
 
   _clampTabScroll() {
@@ -789,8 +853,8 @@ export class Player {
         cur = { time: c.time, hands: [], feet: [] };
         cols.push(cur);
       }
-      if (hp !== undefined) cur.hands.push({ ch: c.ch, p: hp });
-      else cur.feet.push({ ch: c.ch, p: fp });
+      if (hp !== undefined) cur.hands.push({ ch: c.ch, p: hp, chip: c });
+      else cur.feet.push({ ch: c.ch, p: fp, chip: c });
     }
 
     // Beat boundaries = measure starts + beat lines.
@@ -861,6 +925,10 @@ export class Player {
   }
 
   _playChip(chip, when, offset) {
+    if (chip.slice) {
+      this._playSlice(chip.slice, when, offset);
+      return;
+    }
     const s = this.bank.get(chip.wav);
     if (!s) return;
     const at = Math.max(when, this.ctx.currentTime);
@@ -911,6 +979,28 @@ export class Player {
       if (this._activeHH.get(chip.wav) === src) this._activeHH.delete(chip.wav);
     };
     src.start(at, offset);
+  }
+
+  // A hit sliced from a separated stem. Slices end where the stem's next hit
+  // starts, so they never overlap and need no cut-off or choke logic; a short
+  // ramp at the end avoids a click. Like other one-shots they play at rate 1
+  // whatever the play speed.
+  _playSlice(slice, when, offset) {
+    const buffer = this._stems?.[slice.stem];
+    const dur = slice.len - offset;
+    if (!buffer || dur <= 0.002) return;
+    const at = Math.max(when, this.ctx.currentTime);
+    const src = this.ctx.createBufferSource();
+    src.buffer = buffer;
+    const gain = this.ctx.createGain();
+    const fade = Math.min(0.005, dur / 2);
+    gain.gain.setValueAtTime(1, at + dur - fade);
+    gain.gain.linearRampToValueAtTime(0, at + dur);
+    src.connect(gain);
+    gain.connect(this.noteGain);
+    this._sources.add(src);
+    src.onended = () => this._sources.delete(src);
+    src.start(at, slice.off + offset, dur);
   }
 
   // ---- rendering ----
@@ -1320,6 +1410,14 @@ export class Player {
       g.fillRect(Math.round(phX) - 1, yTop + 4, 2, tabH - 28);
     }
 
+    if (this.editFeet) {
+      g.font = '11px sans-serif';
+      g.textAlign = 'left';
+      g.fillStyle = 'rgba(255,200,90,0.85)';
+      g.fillText(this.playing ? 'Editing feet: pause to edit'
+        : 'Editing feet: tap a kick to switch feet, a hi-hat to toggle the pedal', 8, yTop + 16);
+    }
+
     const { cols, groups } = this._tab;
 
     // Note heads (with ledger lines) per column.
@@ -1362,6 +1460,14 @@ export class Player {
             g.beginPath();
             g.ellipse(x, y, headR + 0.8, headR - 0.6, -0.3, 0, Math.PI * 2);
             g.fill();
+          }
+          // BD and LBD share a staff position; mark the left foot while
+          // feet are being edited.
+          if (n.ch === 0x1C && this.editFeet) {
+            g.font = 'bold 9px sans-serif';
+            g.textAlign = 'right';
+            g.fillStyle = 'rgba(255,200,90,0.95)';
+            g.fillText('L', x - headR - 2, y + 3);
           }
         }
       }

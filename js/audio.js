@@ -60,6 +60,8 @@ async function decodeVorbis(ctx, arrayBuffer) {
   return buffer;
 }
 
+const decodedByBlob = new WeakMap(); // Blob -> Promise<AudioBuffer>
+
 export class SoundBank {
   constructor(audioCtx) {
     this.ctx = audioCtx;
@@ -74,10 +76,23 @@ export class SoundBank {
     this.sounds.clear();
   }
 
+  // Decoded buffers are cached per Blob, so reloading a chart with the same
+  // files (e.g. after re-timing it to a recording) doesn't decode again.
+  // AudioBuffers aren't tied to a context, so the cache survives recreation.
+  decode(blob) {
+    let p = decodedByBlob.get(blob);
+    if (!p) {
+      p = this._decodeUncached(blob);
+      decodedByBlob.set(blob, p);
+      p.catch(() => decodedByBlob.delete(blob));
+    }
+    return p;
+  }
+
   // Decode one file: XA with our own decoder, everything else natively,
-  // falling back to the vendored Vorbis decoder for OGG data the browser
-  // rejects (Safari).
-  async decode(blob) {
+  // falling back for OGG data the browser rejects (Safari): Opus (separated
+  // stems) through WebCodecs, Vorbis through the vendored decoder.
+  async _decodeUncached(blob) {
     const data = await blob.arrayBuffer();
     if (isXA(data)) {
       const { sampleRate, channels } = decodeXA(data);
@@ -90,6 +105,8 @@ export class SoundBank {
     } catch (err) {
       const raw = await blob.arrayBuffer(); // decodeAudioData detached the first copy
       if (raw.byteLength >= 4 && isOgg(raw)) {
+        const { isOggOpus, decodeOggOpus } = await import('./ogg.js');
+        if (isOggOpus(raw)) return decodeOggOpus(this.ctx, raw);
         return decodeVorbis(this.ctx, raw);
       }
       throw err;

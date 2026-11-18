@@ -19,7 +19,7 @@
   <header class="topbar">
     <h1>DTX Web Player</h1>
     <div class="actions">
-      <button id="btn-import-zip" class="btn primary">Import ZIP</button>
+      <button id="btn-import-zip" class="btn primary" title="DTX song ZIPs or Guitar Pro files (.gp, .gp3–.gp5, .gpx)">Import ZIP / GP</button>
       <button id="btn-import-url" class="btn">Import URL</button>
       <button id="btn-import-folder" class="btn">Import Folder</button>
       <button id="btn-settings" class="btn">Settings</button>
@@ -27,12 +27,25 @@
   </header>
   <p id="empty-hint" hidden>
     No songs yet. Import a ZIP containing .dtx chart files and their audio
-    (OGG / WAV / MP3). Imported songs are stored in this browser so they stay
-    available next time.
+    (OGG / WAV / MP3), or a Guitar Pro file with a drum track. Imported songs
+    are stored in this browser so they stay available next time.
   </p>
   <ul id="song-list"></ul>
-  <input type="file" id="file-zip" accept=".zip,application/zip" multiple hidden>
+  <input type="file" id="file-zip" accept=".zip,application/zip,.gp,.gp3,.gp4,.gp5,.gpx" multiple hidden>
   <input type="file" id="file-folder" webkitdirectory hidden>
+  <dialog id="gp-import" class="panel-box">
+    <form method="dialog">
+      <h2>Import Guitar Pro</h2>
+      <p id="gp-import-files" class="gp-import-files"></p>
+      <label class="display-row"><input type="checkbox" id="gp-kick-split"> Split fast kick runs between both feet</label>
+      <label class="display-row"><input type="checkbox" id="gp-hh-close"> Close open hi-hats with the pedal</label>
+      <p class="panel-note">You can change these later in Settings → Feet.</p>
+      <div class="panel-foot">
+        <button value="cancel" class="btn">Cancel</button>
+        <button value="ok" class="btn primary">Import</button>
+      </div>
+    </form>
+  </dialog>
   <input type="file" id="file-skin" accept=".zip,application/zip" hidden>
 </main>
 
@@ -90,6 +103,18 @@
       <section>
         <h3>Playback</h3>
         <div id="playback-opts"></div>
+      </section>
+      <section>
+        <h3>Recording</h3>
+        <div id="sync-opts"></div>
+      </section>
+      <section>
+        <h3>Separation models</h3>
+        <div id="model-opts"></div>
+      </section>
+      <section>
+        <h3>Feet</h3>
+        <div id="feet-opts"></div>
       </section>
       <section>
         <h3>Lane order &amp; grouping</h3>
