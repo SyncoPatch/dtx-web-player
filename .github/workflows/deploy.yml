@@ -27,4 +27,4 @@ jobs:
           publish_branch: gh-pages
           # Preserve pr-preview/ subfolders created by open PRs
           keep_files: true
-          exclude_assets: '.github,serve.py'
+          exclude_assets: '.github,serve.py,tests'

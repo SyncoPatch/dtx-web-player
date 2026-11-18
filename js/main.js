@@ -3,7 +3,7 @@
 import { extractZip } from './zip.js';
 import { createZip } from './zipwrite.js';
 import { parseDTX, parseSetDef, decodeText } from './dtx.js';
-import { listSongs, addSong, updateSong, deleteSong, getSongFiles, listSkins, addSkin, deleteSkin } from './db.js';
+import { listSongs, addSong, updateSong, deleteSong, getSongFiles, listFileMeta, listSkins, addSkin, deleteSkin } from './db.js';
 import { Player, NOTE_TYPES, LANE_IDS, GROUP_RULES, defaultColors, defaultDisplay } from './player.js';
 import { Skin, collectSkinFiles } from './skin.js';
 import { isGuitarProFile, convertGuitarPro } from './gp.js'; // alphaTab itself loads lazily
@@ -64,6 +64,7 @@ const settings = {
   hiddenLanes: [],
   skinId: null,
   gpFeet: { kickSplit: true, hhClose: true }, // last choice in the GP import dialog
+  keepVideos: false, // store BGA videos found in imports (they aren't played)
 };
 try {
   const saved = JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{}');
@@ -166,6 +167,7 @@ function fmtLevel(l) {
 }
 
 function fmtSize(bytes) {
+  if (bytes >= 1 << 30) return (bytes / (1 << 30)).toFixed(2) + ' GB';
   if (bytes >= 1 << 20) return (bytes / (1 << 20)).toFixed(1) + ' MB';
   return Math.round(bytes / 1024) + ' KB';
 }
@@ -225,7 +227,44 @@ function makeResolver(fileMap, baseDir) {
 // ---- import ----
 
 // entries: [{ path (original, /-separated), data: Blob }]
-async function importEntries(fallbackTitle, totalSize, entries) {
+// Video files (BGA/AVI). The player shows no video, and they are often the
+// largest files in a package, so imports skip them unless settings.keepVideos.
+const VIDEO_EXTS = new Set(['.avi', '.mp4', '.m4v', '.mov', '.wmv', '.mpg', '.mpeg', '.webm', '.mkv', '.flv', '.ogv', '.asf']);
+
+function isVideoPath(path) {
+  const i = path.lastIndexOf('.');
+  return i >= 0 && VIDEO_EXTS.has(path.slice(i).toLowerCase());
+}
+
+const skipVideo = () => (settings.keepVideos ? null : isVideoPath);
+
+// "Skipped 2 video files (180.3 MB) …" for an import summary, or ''.
+function skippedVideosNote(skipped) {
+  if (!skipped.length) return '';
+  const bytes = skipped.reduce((a, f) => a + (f.size || 0), 0);
+  return `Skipped ${skipped.length} video file${skipped.length > 1 ? 's' : ''} (${fmtSize(bytes)}): ` +
+    'the player doesn\u2019t show videos. Settings \u2192 Storage \u2192 Keep videos stores them anyway.';
+}
+
+// addSong with a readable message when the browser is out of storage, and a
+// request (once granted, it sticks) that the library not be evicted.
+async function storeSong(song, files) {
+  try {
+    await addSong(song, files);
+  } catch (err) {
+    if (err?.name !== 'QuotaExceededError') throw err;
+    let free = '';
+    try {
+      const { usage, quota } = await navigator.storage.estimate();
+      free = ` About ${fmtSize(Math.max(0, quota - usage))} is free for this site.`;
+    } catch { /* estimate unavailable */ }
+    throw new Error(`Not enough storage space: "${song.title}" needs ${fmtSize(song.size)}.${free} ` +
+      'Delete songs or remove videos in Settings \u2192 Storage.');
+  }
+  navigator.storage?.persist?.().catch(() => {});
+}
+
+async function importEntries(fallbackTitle, entries) {
   const files = [];
   for (const e of entries) {
     const path = e.path.replace(/\\/g, '/');
@@ -279,9 +318,9 @@ async function importEntries(fallbackTitle, totalSize, entries) {
     artist,
     dtxs,
     addedAt: Date.now(),
-    size: totalSize,
+    size: files.reduce((a, f) => a + f.blob.size, 0),
   };
-  await addSong(song, files);
+  await storeSong(song, files);
   return song;
 }
 
@@ -371,7 +410,7 @@ async function importGuitarPro(file, feetOpts = {}) {
     source: 'guitarpro',
     sync,
   };
-  await addSong(song, files);
+  await storeSong(song, files);
   return warnings;
 }
 
@@ -399,6 +438,7 @@ function askGpImportOptions(names) {
 async function importZipFiles(fileList) {
   const gpNames = fileList.filter((f) => isGuitarProFile(f.name)).map((f) => f.name);
   const gpOpts = gpNames.length ? await askGpImportOptions(gpNames) : null;
+  const skipped = [];
   for (const file of fileList) {
     if (isGuitarProFile(file.name)) {
       if (!gpOpts) continue; // dialog cancelled
@@ -413,13 +453,13 @@ async function importZipFiles(fileList) {
     }
     try {
       showOverlay(`Extracting ${file.name}…`);
-      const entries = await extractZip(await file.arrayBuffer());
+      const entries = await extractZip(file, { skip: skipVideo() });
       showOverlay(`Importing ${file.name}…`);
       await importEntries(
         file.name.replace(/\.zip$/i, ''),
-        file.size,
-        entries.map((e) => ({ path: e.name, blob: new Blob([e.data]) })),
+        entries.map((e) => ({ path: e.name, blob: e.blob })),
       );
+      skipped.push(...entries.skipped);
     } catch (err) {
       console.error(err);
       alert(`Failed to import ${file.name}:\n${err.message}`);
@@ -427,6 +467,8 @@ async function importZipFiles(fileList) {
   }
   hideOverlay();
   await renderSongList();
+  const note = skippedVideosNote(skipped);
+  if (note) alert(note);
 }
 
 async function importFromUrl() {
@@ -437,7 +479,7 @@ async function importFromUrl() {
     const resp = await fetch(url);
     if (!resp.ok) throw new Error(`HTTP ${resp.status} ${resp.statusText}`);
 
-    let buf;
+    let zip;
     const total = Number(resp.headers.get('Content-Length')) || 0;
     if (resp.body && total) {
       const reader = resp.body.getReader();
@@ -450,22 +492,24 @@ async function importFromUrl() {
         got += value.length;
         el.overlayText.textContent = `Downloading… ${fmtSize(got)} / ${fmtSize(total)}`;
       }
-      buf = await new Blob(parts).arrayBuffer();
+      zip = new Blob(parts);
     } else {
-      buf = await resp.arrayBuffer();
+      zip = await resp.blob();
     }
 
     const name = decodeURIComponent(
       new URL(url, location.href).pathname.split('/').pop() || 'download.zip',
     );
     showOverlay(`Extracting ${name}…`);
-    const entries = await extractZip(buf);
+    const entries = await extractZip(zip, { skip: skipVideo() });
     showOverlay(`Importing ${name}…`);
     await importEntries(
       name.replace(/\.zip$/i, ''),
-      buf.byteLength,
-      entries.map((e) => ({ path: e.name, blob: new Blob([e.data]) })),
+      entries.map((e) => ({ path: e.name, blob: e.blob })),
     );
+    hideOverlay();
+    const note = skippedVideosNote(entries.skipped);
+    if (note) alert(note);
   } catch (err) {
     console.error(err);
     const corsHint = err instanceof TypeError
@@ -485,12 +529,20 @@ async function importFolder(fileList) {
   try {
     showOverlay('Importing folder…');
     const root = (files[0].webkitRelativePath || files[0].name).split('/')[0];
-    const size = files.reduce((a, f) => a + f.size, 0);
-    await importEntries(
-      root,
-      size,
-      files.map((f) => ({ path: f.webkitRelativePath || f.name, blob: f })),
-    );
+    const skip = skipVideo();
+    const skipped = [];
+    const kept = [];
+    for (const f of files) {
+      const path = f.webkitRelativePath || f.name;
+      if (skip?.(path)) skipped.push({ name: path, size: f.size });
+      else kept.push({ path, blob: f });
+    }
+    await importEntries(root, kept);
+    hideOverlay();
+    await renderSongList();
+    const note = skippedVideosNote(skipped);
+    if (note) alert(note);
+    return;
   } catch (err) {
     console.error(err);
     alert(`Failed to import folder:\n${err.message}`);
@@ -1553,7 +1605,7 @@ async function buildSkinSection() {
 async function importSkinZip(file) {
   try {
     showOverlay(`Extracting ${file.name}…`);
-    const entries = await extractZip(await file.arrayBuffer());
+    const entries = await extractZip(file);
     const files = collectSkinFiles(entries);
     const skin = {
       id: newId(),
@@ -2401,6 +2453,96 @@ function buildFeetSection() {
   row('Edits', actions).classList.add('sync-recording');
 }
 
+// ---- storage ----
+
+let storageBusy = false;
+
+async function buildStorageSection() {
+  const wrap = $('storage-opts');
+  if (!wrap) return;
+  const row = (text, ...nodes) => {
+    const r = document.createElement('span');
+    r.className = 'display-row';
+    r.append(text, ...nodes);
+    return r;
+  };
+  const note = (text) => {
+    const p = document.createElement('p');
+    p.className = 'panel-note';
+    p.textContent = text;
+    return p;
+  };
+
+  const keep = document.createElement('input');
+  keep.type = 'checkbox';
+  keep.checked = !!settings.keepVideos;
+  keep.onchange = () => { settings.keepVideos = keep.checked; saveSettings(); };
+  const keepLabel = document.createElement('label');
+  keepLabel.append(keep, ' Keep videos when importing');
+  keepLabel.title = 'The player doesn\u2019t show background videos, so imports skip them to save space. '
+    + 'Turn this on to store them anyway.';
+
+  const usage = document.createElement('span');
+  usage.textContent = '\u2026';
+  const videos = document.createElement('span');
+  videos.className = 'sync-recording';
+  videos.textContent = '\u2026';
+  wrap.replaceChildren(row('Used', usage), row('Videos', videos), row('Import', keepLabel));
+
+  let estimate = null, persisted = null, meta = [];
+  try { estimate = await navigator.storage?.estimate?.(); } catch { /* unavailable */ }
+  try { persisted = await navigator.storage?.persisted?.(); } catch { /* unavailable */ }
+  try { meta = await listFileMeta(); } catch (err) { console.warn('storage listing failed', err); }
+
+  const library = meta.reduce((a, f) => a + f.size, 0);
+  usage.textContent = `Songs ${fmtSize(library)}` +
+    (estimate?.quota ? ` \u00b7 this site ${fmtSize(estimate.usage || 0)} of ${fmtSize(estimate.quota)}` : '');
+  if (persisted === false) {
+    wrap.append(note('The browser may clear this library when the device runs low on space, or (Safari) after '
+      + 'a week without visits. Installing the app to the Home Screen / Dock protects it.'));
+  }
+
+  const vids = meta.filter((f) => isVideoPath(f.path));
+  const vidBytes = vids.reduce((a, f) => a + f.size, 0);
+  videos.replaceChildren(vids.length
+    ? `${vids.length} file${vids.length > 1 ? 's' : ''}, ${fmtSize(vidBytes)} `
+    : 'None stored');
+  if (!vids.length) return;
+  const btn = document.createElement('button');
+  btn.className = 'btn small';
+  btn.textContent = 'Remove videos';
+  btn.title = 'Delete the stored video files from every song. Charts and audio are kept.';
+  btn.disabled = storageBusy;
+  btn.onclick = async () => {
+    if (!confirm(`Remove ${vids.length} video file${vids.length > 1 ? 's' : ''} (${fmtSize(vidBytes)}) from the library? `
+      + 'Charts and audio stay; the videos aren\u2019t played anyway.')) return;
+    storageBusy = true;
+    btn.disabled = true;
+    try {
+      const bySong = new Map();
+      for (const f of vids) {
+        if (!bySong.has(f.songId)) bySong.set(f.songId, []);
+        bySong.get(f.songId).push(f);
+      }
+      const songs = new Map((await listSongs()).map((s) => [s.id, s]));
+      for (const [songId, files] of bySong) {
+        const song = songs.get(songId);
+        if (!song) continue; // orphaned files: leave them to deleteSong
+        const freed = files.reduce((a, f) => a + f.size, 0);
+        await updateSong({ ...song, size: Math.max(0, (song.size || 0) - freed) }, [], files.map((f) => f.path));
+      }
+      alert(`Removed ${vids.length} video file${vids.length > 1 ? 's' : ''}, freeing ${fmtSize(vidBytes)}.`);
+    } catch (err) {
+      console.error(err);
+      alert(`Failed to remove videos:\n${err.message}`);
+    }
+    storageBusy = false;
+    await renderSongList();
+    buildStorageSection();
+  };
+  videos.append(btn);
+}
+
 function openSettingsPanel() {
   buildPlaybackSection();
   buildSyncSection();
@@ -2409,6 +2551,7 @@ function openSettingsPanel() {
   buildNoteColorList();
   buildDisplayOpts();
   buildSkinSection();
+  buildStorageSection();
   lanePanel.hidden = false;
 }
 
