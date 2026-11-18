@@ -91,11 +91,9 @@ function gaussianSmooth(x, sigma) {
   return out;
 }
 
-// samples: mono Float32Array at SR. Returns { frame, t0, bands: [Float32Array × 3] }
-// of normalized onset strength (≈ z-scores: 0 = typical, higher = onset).
-// Value i belongs to time t0 + i * frame: an onset peaks when it reaches the
-// middle of the analysis window, so t0 is half a window.
-export function onsetFeatures(samples, onProgress) {
+// Raw spectral flux per band: positive change of the log-compressed spectrum
+// from frame to frame (frame f covers samples f*HOP .. f*HOP+WIN).
+function spectralFlux(samples, onProgress) {
   const nFrames = samples.length >= WIN ? Math.floor((samples.length - WIN) / HOP) + 1 : 0;
   const win = new Float64Array(WIN);
   for (let i = 0; i < WIN; i++) win[i] = 0.5 - 0.5 * Math.cos(2 * Math.PI * i / WIN);
@@ -136,7 +134,37 @@ export function onsetFeatures(samples, onProgress) {
     if (second) { addFlux(f + 1, lb, la); prev.set(lb); } else prev.set(la);
     if (onProgress && (f & 2047) === 0) onProgress(f / nFrames);
   }
+  return flux;
+}
 
+// Time of flux frame 0, measured rather than assumed. With strong log
+// compression the flux of a hit peaks as soon as the hit enters the tail of
+// the Hann window, not when it reaches the middle, so labelling frames by the
+// window centre put every onset (and so every aligned bar) ~17 ms early.
+// Calibrated once by running an impulse through the same pipeline.
+let calibratedT0 = null;
+function frameT0() {
+  if (calibratedT0 === null) {
+    const at = 4 * WIN;
+    const click = new Float32Array(8 * WIN);
+    click[at] = 1;
+    const peaks = spectralFlux(click).map((x) => {
+      let best = 0;
+      for (let i = 1; i < x.length; i++) if (x[i] > x[best]) best = i;
+      return best;
+    });
+    const peak = peaks.reduce((a, b) => a + b, 0) / peaks.length;
+    calibratedT0 = (at - peak * HOP) / SR;
+  }
+  return calibratedT0;
+}
+
+// samples: mono Float32Array at SR. Returns { frame, t0, bands: [Float32Array × 3] }
+// of normalized onset strength (≈ z-scores: 0 = typical, higher = onset).
+// Value i belongs to time t0 + i * frame, where t0 is calibrated so that an
+// onset's peak lands on the time the hit starts (see frameT0).
+export function onsetFeatures(samples, onProgress) {
+  const flux = spectralFlux(samples, onProgress);
   const frame = HOP / SR;
   const bands = flux.map((x) => {
     const mean = movingMean(x, Math.round(0.25 / frame));
@@ -147,7 +175,7 @@ export function onsetFeatures(samples, onProgress) {
     for (let i = 0; i < x.length; i++) d[i] = Math.max(-1, Math.min(8, d[i] / std));
     return d;
   });
-  return { frame, t0: WIN / 2 / SR, bands };
+  return { frame, t0: frameT0(), bands };
 }
 
 // ---- 2. alignment ----

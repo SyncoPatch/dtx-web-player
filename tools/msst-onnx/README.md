@@ -45,9 +45,14 @@ python export.py --selftest   # checks the STFT replacement against torch (no MS
 - **HTDemucs4 FT Drums**: weights
   `https://dl.fbaipublicfiles.com/demucs/hybrid_transformer/f7e0c4bc-ba3fe64a.th`,
   config `configs/config_musdb18_htdemucs.yaml` from the MSST checkout.
-- **MDX23C DrumSep (6 stems)**, from
-  `https://github.com/jarredou/models/releases/tag/aufr33-jarredou_MDX23C_DrumSep_model_v0.1`:
-  `aufr33-jarredou_DrumSep_model_mdx23c_ep_141_sdr_10.8059.ckpt` and the `.yaml` next to it.
+- **MDX23C DrumSep (6 stems)** by aufr33 & jarredou. The original GitHub release
+  (`jarredou/models`) is gone; these mirrors carry the same files:
+  - checkpoint: `https://huggingface.co/Sucial/MSST-WebUI/resolve/main/All_Models/multi_stem_models/aufr33-jarredou_DrumSep_model_mdx23c_ep_141_sdr_10.8059.ckpt`
+    (SHA-256 `d2a4aa53eb584d21eead358a4e66d1882ad182911be018f052b5da73be9096d0`)
+  - config: `https://huggingface.co/Politrees/UVR_resources/resolve/main/models/MDX23C/config_drumsep_mdx23c.yaml`
+
+  Check the checkpoint with `shasum -a 256` before exporting; `export-recommended.sh`
+  does this for you.
 
 ## 3. Export
 
@@ -58,7 +63,7 @@ python export.py --msst ~/src/MSST --model-type htdemucs \
   --audio some-song.wav
 
 python export.py --msst ~/src/MSST --model-type mdx23c \
-  --config aufr33-jarredou_DrumSep_model_mdx23c_ep_141_sdr_10.8059.yaml \
+  --config config_drumsep_mdx23c.yaml \
   --checkpoint aufr33-jarredou_DrumSep_model_mdx23c_ep_141_sdr_10.8059.ckpt \
   --role drumsep --out drumsep-mdx23c-6 --audio some-drum-stem.wav
 ```
