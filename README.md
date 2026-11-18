@@ -56,6 +56,9 @@ aren't served from the offline cache; pass `--sw` to test offline mode.
 
 - **Import ZIP / GP** — pick one or more `.zip` files, each containing `.dtx` chart(s)
   and their audio files (subfolders are fine; Shift-JIS file names are handled).
+  Background videos (`.avi`, `.mp4`, …) are skipped, since the player doesn't
+  show them; **Settings → Storage** can keep them, shows how much space the
+  library uses, and removes videos already stored.
   The same button accepts **Guitar Pro** files (`.gp`, `.gp3`, `.gp4`, `.gp5`,
   `.gpx`): each drum track becomes a chart, with repeats and D.S./coda jumps
   played out in order, voiced by a built-in synthesized drum kit.
