@@ -3,7 +3,7 @@
 import { extractZip } from './zip.js';
 import { createZip } from './zipwrite.js';
 import { parseDTX, parseSetDef, decodeText } from './dtx.js';
-import { listSongs, addSong, updateSong, deleteSong, getSongFiles, listFileMeta, listSkins, addSkin, deleteSkin } from './db.js';
+import { listSongs, getSong, addSong, patchSong, deleteSong, getSongFiles, listFileMeta, listSkins, addSkin, deleteSkin } from './db.js';
 import { Player, NOTE_TYPES, LANE_IDS, GROUP_RULES, defaultColors, defaultDisplay } from './player.js';
 import { Skin, collectSkinFiles } from './skin.js';
 import { isGuitarProFile, convertGuitarPro } from './gp.js'; // alphaTab itself loads lazily
@@ -553,77 +553,117 @@ async function importFolder(fileList) {
 
 // ---- song list ----
 
+let listGen = 0;
 async function renderSongList() {
+  // Renders can overlap (imports, chart updates); only the newest may paint,
+  // or an older read could replace the list with outdated cards.
+  const gen = ++listGen;
   const songs = await listSongs();
+  if (gen !== listGen) return;
   const needArtist = [];
   el.songList.replaceChildren();
   el.emptyHint.hidden = songs.length > 0;
 
   for (const song of songs) {
-    const li = document.createElement('li');
-    li.className = 'song-card';
-
-    const head = document.createElement('div');
-    head.className = 'song-head';
-    const title = document.createElement('span');
-    title.className = 'song-title';
-    title.textContent = song.title;
-    title.title = song.title;
-    const menuBtn = document.createElement('button');
-    menuBtn.className = 'btn small card-menu-btn';
-    menuBtn.textContent = '⋯';
-    menuBtn.title = 'More actions';
-    menuBtn.onclick = () => showCardMenu(menuBtn, song);
-    const del = document.createElement('button');
-    del.className = 'btn small danger';
-    del.textContent = 'Delete';
-    del.onclick = async () => {
-      if (!confirm(`Delete "${song.title}" from this browser?`)) return;
-      await deleteSong(song.id);
-      let pruned = false;
-      for (const key of Object.keys(chartOffsets)) {
-        if (key.startsWith(song.id + '::')) { delete chartOffsets[key]; pruned = true; }
-      }
-      if (pruned) localStorage.setItem(CHART_OFFSETS_KEY, JSON.stringify(chartOffsets));
-      renderSongList();
-    };
-    head.append(title, menuBtn, del);
-
-    const info = document.createElement('div');
-    info.className = 'song-info';
-    info.textContent = songInfoText(song);
-    info.title = info.textContent;
-    info.hidden = !info.textContent;
-    if (song.artist === undefined) needArtist.push([song, info]);
-
-    const meta = document.createElement('div');
-    meta.className = 'song-meta';
-    const kind = song.source === 'guitarpro' ? (song.sync?.audio ? 'Guitar Pro + recording · ' : 'Guitar Pro · ') : '';
-    meta.textContent = `${kind}${song.dtxs.length} chart${song.dtxs.length > 1 ? 's' : ''} · ${fmtSize(song.size)} · added ${new Date(song.addedAt).toLocaleDateString()}`;
-
-    const charts = document.createElement('div');
-    charts.className = 'charts';
-    for (const d of song.dtxs) {
-      const btn = document.createElement('button');
-      btn.className = 'chart-btn';
-      const name = document.createElement('span');
-      name.textContent = d.label || d.title || basename(d.path);
-      btn.append(name);
-      const lvl = fmtLevel(d.level);
-      if (lvl) {
-        const badge = document.createElement('span');
-        badge.className = 'lvl';
-        badge.textContent = lvl;
-        btn.append(badge);
-      }
-      btn.onclick = () => openChart(song, d);
-      charts.append(btn);
+    // One broken record must not hide the songs listed after it.
+    try {
+      el.songList.append(songCard(song, needArtist));
+    } catch (err) {
+      console.error('could not show song', song?.id, err);
+      el.songList.append(brokenSongCard(song));
     }
-
-    li.append(head, info, meta, charts);
-    el.songList.append(li);
   }
   backfillArtists(needArtist);
+}
+
+function songCard(song, needArtist) {
+  const li = document.createElement('li');
+  li.className = 'song-card';
+
+  const head = document.createElement('div');
+  head.className = 'song-head';
+  const title = document.createElement('span');
+  title.className = 'song-title';
+  title.textContent = song.title;
+  title.title = song.title;
+  const menuBtn = document.createElement('button');
+  menuBtn.className = 'btn small card-menu-btn';
+  menuBtn.textContent = '⋯';
+  menuBtn.title = 'More actions';
+  menuBtn.onclick = () => showCardMenu(menuBtn, song);
+  const del = document.createElement('button');
+  del.className = 'btn small danger';
+  del.textContent = 'Delete';
+  del.onclick = async () => {
+    if (!confirm(`Delete "${song.title}" from this browser?`)) return;
+    await deleteSong(song.id);
+    let pruned = false;
+    for (const key of Object.keys(chartOffsets)) {
+      if (key.startsWith(song.id + '::')) { delete chartOffsets[key]; pruned = true; }
+    }
+    if (pruned) localStorage.setItem(CHART_OFFSETS_KEY, JSON.stringify(chartOffsets));
+    renderSongList();
+  };
+  head.append(title, menuBtn, del);
+
+  const info = document.createElement('div');
+  info.className = 'song-info';
+  info.textContent = songInfoText(song);
+  info.title = info.textContent;
+  info.hidden = !info.textContent;
+  if (song.artist === undefined) needArtist.push([song, info]);
+
+  const meta = document.createElement('div');
+  meta.className = 'song-meta';
+  const kind = song.source === 'guitarpro' ? (song.sync?.audio ? 'Guitar Pro + recording · ' : 'Guitar Pro · ') : '';
+  meta.textContent = `${kind}${song.dtxs.length} chart${song.dtxs.length > 1 ? 's' : ''} · ${fmtSize(song.size)} · added ${new Date(song.addedAt).toLocaleDateString()}`;
+
+  const charts = document.createElement('div');
+  charts.className = 'charts';
+  for (const d of song.dtxs) {
+    const btn = document.createElement('button');
+    btn.className = 'chart-btn';
+    const name = document.createElement('span');
+    name.textContent = d.label || d.title || basename(d.path);
+    btn.append(name);
+    const lvl = fmtLevel(d.level);
+    if (lvl) {
+      const badge = document.createElement('span');
+      badge.className = 'lvl';
+      badge.textContent = lvl;
+      btn.append(badge);
+    }
+    btn.onclick = () => openChart(song, d);
+    charts.append(btn);
+  }
+
+  li.append(head, info, meta, charts);
+  return li;
+}
+
+// Fallback card for a record the normal card can't show: title and Delete.
+function brokenSongCard(song) {
+  const li = document.createElement('li');
+  li.className = 'song-card';
+  const head = document.createElement('div');
+  head.className = 'song-head';
+  const title = document.createElement('span');
+  title.className = 'song-title';
+  title.textContent = String(song?.title || song?.id || 'Unknown song');
+  const del = document.createElement('button');
+  del.className = 'btn small danger';
+  del.textContent = 'Delete';
+  del.onclick = async () => {
+    if (!confirm(`Delete "${title.textContent}" from this browser?`)) return;
+    await deleteSong(song.id);
+    renderSongList();
+  };
+  head.append(title, del);
+  const meta = document.createElement('div');
+  meta.className = 'song-meta';
+  meta.textContent = 'This song\u2019s data is damaged and can\u2019t be opened.';
+  li.append(head, meta);
+  return li;
 }
 
 const fmtBpm = (b) => String(Math.round(b * 100) / 100);
@@ -642,20 +682,32 @@ function songInfoText(song) {
 
 // Songs imported before artists were stored: read it from the first chart's
 // header once, save it, and fill the card in place.
+// Every list render passes its cards here; a song already being filled in
+// by an earlier pass is skipped, so passes never pile up on one song.
+const backfilling = new Set();
 async function backfillArtists(list) {
   for (const [song, info] of list) {
+    if (backfilling.has(song.id)) continue;
+    backfilling.add(song.id);
     try {
       const files = await getSongFiles(song.id);
       const blob = files.find((f) => f.path === song.dtxs[0]?.path)?.blob;
       let artist = '';
       if (blob) artist = parseDTX(decodeText(await blob.arrayBuffer()), { headersOnly: true }).artist || '';
-      song.artist = artist;
-      await updateSong(song);
+      // Only the artist is written, onto the record as stored now: this pass
+      // can run long after its list was drawn, and the song may have changed
+      // (recording attached, stems added) or been deleted meanwhile.
+      const saved = await patchSong(song.id, (s) => (s.artist === undefined ? { ...s, artist } : s));
+      if (!saved) continue;
+      song.artist = saved.artist;
+      if (current?.song.id === song.id) current.song.artist = saved.artist;
       info.textContent = songInfoText(song);
       info.title = info.textContent;
       info.hidden = !info.textContent;
     } catch (err) {
       console.warn('artist backfill failed', song.id, err);
+    } finally {
+      backfilling.delete(song.id);
     }
   }
 }
@@ -763,6 +815,11 @@ async function openChart(song, chartInfo, { fileMap = null, at = 0, autoplay = t
   try {
     showOverlay('Loading files…');
     if (!fileMap) {
+      // Opened from the library: use the record as stored now, not the copy
+      // captured when its card was drawn (it may predate a recording, stems…).
+      const latest = await getSong(song.id);
+      if (!latest) throw new Error('This song is no longer in the library.');
+      song = latest;
       const stored = await getSongFiles(song.id);
       fileMap = new Map(stored.map((f) => [f.path, f.blob]));
     }
@@ -1720,8 +1777,11 @@ async function saveSongSync(song, fileMap, sync, putFiles = [], deletePaths = []
     charts.push({ path: d.path, origPath: d.path, blob: dtxBlob(gpChartText(model, sync, d.path)) });
   }
   for (const f of charts) fileMap.set(f.path, f.blob);
-  const updated = { ...song, sync, size: [...fileMap.values()].reduce((a, b) => a + b.size, 0) };
-  await updateSong(updated, [...putFiles, ...charts], deletePaths);
+  const size = [...fileMap.values()].reduce((a, b) => a + b.size, 0);
+  // Only sync and size are this function's to change; every other field is
+  // taken from the stored record.
+  const updated = await patchSong(song.id, (s) => ({ ...s, sync, size }), [...putFiles, ...charts], deletePaths);
+  if (!updated) throw new Error('This song was deleted.');
   return updated;
 }
 
@@ -2529,7 +2589,7 @@ async function buildStorageSection() {
         const song = songs.get(songId);
         if (!song) continue; // orphaned files: leave them to deleteSong
         const freed = files.reduce((a, f) => a + f.size, 0);
-        await updateSong({ ...song, size: Math.max(0, (song.size || 0) - freed) }, [], files.map((f) => f.path));
+        await patchSong(songId, (s) => ({ ...s, size: Math.max(0, (s.size || 0) - freed) }), [], files.map((f) => f.path));
       }
       alert(`Removed ${vids.length} video file${vids.length > 1 ? 's' : ''}, freeing ${fmtSize(vidBytes)}.`);
     } catch (err) {
