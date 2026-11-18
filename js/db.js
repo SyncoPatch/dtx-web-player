@@ -66,7 +66,35 @@ export async function addSong(song, files) {
   });
 }
 
+// Change a song record and some of its files in one transaction. change()
+// gets the record as currently stored, so a caller holding an older copy
+// can't revert fields it doesn't own (e.g. the artist backfill once wrote
+// back a snapshot that predated an attached recording). If the song was
+// deleted meanwhile nothing is written and the result is null; otherwise
+// it is the stored record.
+export async function patchSong(id, change, putFiles = [], deletePaths = []) {
+  const db = await openDB();
+  const tx = db.transaction(['songs', 'files'], 'readwrite');
+  const songs = tx.objectStore('songs');
+  let result = null;
+  const r = songs.get(id);
+  r.onsuccess = () => {
+    if (!r.result) return; // deleted: write nothing
+    result = change(r.result);
+    songs.put(result);
+    const fs = tx.objectStore('files');
+    for (const path of deletePaths) fs.delete([id, path]);
+    for (const f of putFiles) fs.put({ songId: id, ...f });
+  };
+  return new Promise((resolve, reject) => {
+    tx.oncomplete = () => resolve(result);
+    tx.onerror = () => reject(tx.error);
+    tx.onabort = () => reject(tx.error);
+  });
+}
+
 // Replace a song record and change some of its files in one transaction.
+// Prefer patchSong: this overwrites every field with the given copy.
 export async function updateSong(song, putFiles = [], deletePaths = []) {
   const db = await openDB();
   const tx = db.transaction(['songs', 'files'], 'readwrite');
@@ -79,6 +107,11 @@ export async function updateSong(song, putFiles = [], deletePaths = []) {
     tx.onerror = () => reject(tx.error);
     tx.onabort = () => reject(tx.error);
   });
+}
+
+export async function getSong(id) {
+  const db = await openDB();
+  return (await req(db.transaction('songs').objectStore('songs').get(id))) ?? null;
 }
 
 export async function getSongFiles(songId) {
