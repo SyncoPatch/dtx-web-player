@@ -14,8 +14,12 @@
 import { getSkinFiles } from './db.js';
 
 // 7_chips_drums.png note-chip columns, keyed by NOTE_TYPES key. Cells are
-// 64px tall; the animated rows start at y=128, frames 0-7 at 70ms per frame
-// (a single global counter drives all chips, as in NX).
+// 64px tall. NX draws every chip in two passes (CStagePerfDrumsScreen
+// tUpdateAndDraw_Chip_PatternOnly_Drums, then tUpdateAndDraw_Chip_Drums):
+// first the animated pattern row y=128+frame*64 (frames 0-7, 70ms, one global
+// counter), then the static chip row y=0 on top. Row y=64 is the bonus-chip
+// overlay, which DTX charts here never use. The NX default skin repeats the
+// whole chip in its pattern rows, but most skins put only glints there.
 export const CHIP_COLS = {
   BD:  { sx: 0,   sw: 70 },
   HH:  { sx: 70,  sw: 56 },
@@ -120,14 +124,10 @@ export class Skin {
   constructor(images) {
     this.img = images; // Map<lowercased basename, ImageBitmap>
     const chips = images.get(CHIP_SHEET);
-    // Animated rows live at y>=128; short sheets fall back to the static row.
-    if (chips && chips.height >= 192) {
-      this.chipBaseY = 128;
-      this.chipFrames = Math.max(1, Math.min(8, Math.floor((chips.height - 128) / 64)));
-    } else {
-      this.chipBaseY = 0;
-      this.chipFrames = 1;
-    }
+    // Pattern rows live at y>=128; sheets without them draw the chip row only.
+    this.chipFrames = chips && chips.height >= 192
+      ? Math.max(1, Math.min(8, Math.floor((chips.height - 128) / 64)))
+      : 0;
   }
 
   // Decode a stored skin into ImageBitmaps. Per-file decode failures just
@@ -157,14 +157,18 @@ export class Skin {
   get hitBar() { return this._get('screenplaydrums hit-bar.png'); }
 
   // Global chip animation clock (NX: CCounter(0, 7, 70ms)).
-  chipFrame(nowMs) { return Math.floor(nowMs / 70) % this.chipFrames; }
+  chipFrame(nowMs) { return this.chipFrames ? Math.floor(nowMs / 70) % this.chipFrames : 0; }
 
-  // Source rect for a note chip, by NOTE_TYPES key.
+  // Source rects for a note chip, by NOTE_TYPES key: sy is the static chip
+  // row, patternSy the animated row drawn underneath it (null if none).
   chipSprite(key, frame) {
     const bmp = this.img.get(CHIP_SHEET);
     const col = CHIP_COLS[key];
     if (!bmp || !col || col.sx + col.sw > bmp.width) return null;
-    return { bmp, sx: col.sx, sy: this.chipBaseY + frame * 64, sw: col.sw, sh: 64 };
+    return {
+      bmp, sx: col.sx, sw: col.sw, sh: 64, sy: 0,
+      patternSy: this.chipFrames ? 128 + frame * 64 : null,
+    };
   }
 
   // Lane background panel column, by lane id.

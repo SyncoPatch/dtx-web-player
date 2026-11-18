@@ -1263,7 +1263,9 @@ export class Player {
         // Scale the 64px-tall cell by lane width; the art inside is mostly
         // transparent glow, so the visible chip stays chip-sized.
         const scale = lw / sp.sw;
-        g.drawImage(sp.bmp, sp.sx, sp.sy, sp.sw, sp.sh, lx, y - 32 * scale, lw, 64 * scale);
+        const dy = y - 32 * scale, dh = 64 * scale;
+        if (sp.patternSy !== null) g.drawImage(sp.bmp, sp.sx, sp.patternSy, sp.sw, sp.sh, lx, dy, lw, dh);
+        g.drawImage(sp.bmp, sp.sx, sp.sy, sp.sw, sp.sh, lx, dy, lw, dh);
         continue;
       }
       const color = this.colors[type] || this.colors[lane.id];
