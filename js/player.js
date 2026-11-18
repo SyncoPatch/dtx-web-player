@@ -166,12 +166,22 @@ export class Player {
         if (this.playing) this.pause();
         return;
       }
-      // Back in the foreground: opportunistically resume for the easy cases
-      // (desktop, brief switches). _audioDegraded stays set so the next play()
-      // still recreates the context if resume didn't produce a healthy one.
-      this.ctx.resume().catch(() => {});
+      // Back in the foreground: nothing to do. The context was released by the
+      // pause above, and play() brings it back (recreating it if degraded).
+      // Resuming here would reclaim the audio device without the user asking.
     };
     document.addEventListener('visibilitychange', this._onVisible);
+    // Output devices came or went (AirPods handed off to another device,
+    // headphones unplugged, …). Rebuild the context on the next user-started
+    // play so it opens on the current default output, as a page reload would.
+    // Not while playing: seeks and loop jumps call play() outside a gesture,
+    // and a context created there starts suspended on iOS.
+    this._deviceChanged = false;
+    this._onDeviceChange = () => {
+      if (this.playing) this._deviceChanged = true;
+      else this._audioDegraded = true;
+    };
+    navigator.mediaDevices?.addEventListener?.('devicechange', this._onDeviceChange);
     this.bank = new SoundBank(this.ctx);
     this.stretcher = new Stretcher();
     this._stretched = new Map(); // wavId -> stretched AudioBuffer (playSpeed != 1)
@@ -503,6 +513,8 @@ export class Player {
 
   async play() {
     if (this.playing || !this.chips.length) return;
+    clearTimeout(this._releaseTimer);
+    this._releaseTimer = null;
     await this._ensureRunning();
     if (this.pausedAt >= this.duration - 0.05) this.pausedAt = 0;
 
@@ -537,18 +549,36 @@ export class Player {
     this._tick();
   }
 
-  pause() {
+  // keepOutput: an internal pause that play() follows right away (seek, loop
+  // jump, play-speed change). Otherwise the output is released (see below).
+  pause({ keepOutput = false } = {}) {
     if (!this.playing) return;
     this.pausedAt = Math.min(this.time, this.duration);
     this.playing = false;
     clearInterval(this._schedTimer);
     this._schedTimer = null;
     this.stopAudio();
+    if (!keepOutput) this._releaseOutput();
+  }
+
+  // Suspend the context while paused so the browser closes its output stream.
+  // A running context streams silence forever, and macOS hands AirPods back to
+  // the Mac only when audio *starts* — so after the AirPods moved to a phone,
+  // pressing Play could never reclaim them without a reload. With the stream
+  // closed, play()'s resume() is a fresh start. Short delay so quick
+  // pause/play taps don't reopen the Bluetooth link each time.
+  _releaseOutput() {
+    if (this._deviceChanged) { this._deviceChanged = false; this._audioDegraded = true; }
+    clearTimeout(this._releaseTimer);
+    this._releaseTimer = setTimeout(() => {
+      this._releaseTimer = null;
+      if (!this.playing && this.ctx.state === 'running') this.ctx.suspend().catch(() => {});
+    }, 1000);
   }
 
   seek(t) {
     const wasPlaying = this.playing;
-    this.pause();
+    this.pause({ keepOutput: wasPlaying });
     this.pausedAt = Math.max(0, Math.min(t, this.duration));
     this._tabScroll = 0;
     this._resetPointers(this.pausedAt);
@@ -570,7 +600,7 @@ export class Player {
     if (Math.abs(v - this.playSpeed) < 1e-9) return;
     const wasPlaying = this.playing;
     const t = this.time;
-    if (wasPlaying) this.pause();
+    if (wasPlaying) this.pause({ keepOutput: true });
     this.playSpeed = v;
     const gen = this._stretchGen + 1;
     await this._prepareStretched();
@@ -814,6 +844,8 @@ export class Player {
     cancelAnimationFrame(this._raf);
     this._ro.disconnect();
     document.removeEventListener('visibilitychange', this._onVisible);
+    navigator.mediaDevices?.removeEventListener?.('devicechange', this._onDeviceChange);
+    clearTimeout(this._releaseTimer);
     this.ctx.close();
   }
 

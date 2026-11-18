@@ -16,6 +16,17 @@ import { ROLES, listModels, removeModel, installFromFiles, installFromUrl, opfsA
 
 const $ = (id) => document.getElementById(id);
 
+// crypto.randomUUID exists only in secure contexts (HTTPS, localhost); a LAN
+// dev server (http://192.168.…) on iPad lacks it. getRandomValues works anywhere.
+function newId() {
+  if (crypto.randomUUID) return crypto.randomUUID();
+  const b = crypto.getRandomValues(new Uint8Array(16));
+  b[6] = (b[6] & 0x0f) | 0x40;
+  b[8] = (b[8] & 0x3f) | 0x80;
+  const h = [...b].map((x) => x.toString(16).padStart(2, '0')).join('');
+  return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`;
+}
+
 const el = {
   screenSelect: $('screen-select'),
   screenPlayer: $('screen-player'),
@@ -263,7 +274,7 @@ async function importEntries(fallbackTitle, totalSize, entries) {
   for (const d of dtxs) delete d.artist;
 
   const song = {
-    id: crypto.randomUUID(),
+    id: newId(),
     title: songTitle || dtxs[0].title || fallbackTitle,
     artist,
     dtxs,
@@ -351,7 +362,7 @@ async function importGuitarPro(file, feetOpts = {}) {
   });
 
   const song = {
-    id: crypto.randomUUID(),
+    id: newId(),
     title: gp.title || file.name.replace(/\.[^.]+$/, ''),
     artist: gp.artist || '',
     dtxs,
@@ -1545,7 +1556,7 @@ async function importSkinZip(file) {
     const entries = await extractZip(await file.arrayBuffer());
     const files = collectSkinFiles(entries);
     const skin = {
-      id: crypto.randomUUID(),
+      id: newId(),
       name: file.name.replace(/\.zip$/i, ''),
       addedAt: Date.now(),
       size: files.reduce((a, f) => a + f.blob.size, 0),
