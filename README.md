@@ -30,10 +30,35 @@ python3 serve.py        # http://localhost:8000 (port as optional argument)
 updates appear on plain reload. `python3 -m http.server 8000` also works, but
 browsers may cache files — hard-reload (Cmd+Shift+R) after updating.
 
+### Testing on an iPad or phone (HTTPS on the LAN)
+
+Browsers treat `http://192.168.x.x` as insecure and turn off features the app
+needs there: separation models (OPFS), WebGPU, Opus stems (WebCodecs), audio
+device change detection and the service worker. Serve over HTTPS instead:
+
+```sh
+python3 serve.py --https       # https://<this Mac's IP>:8443, also https://<name>.local:8443
+```
+
+The first run creates a local certificate authority in `~/.config/dtx-dev-certs/`
+(outside the repo) and prints the URLs. Trust it once per device:
+
+1. On the iPad, open `https://<Mac IP>:8443/dev-ca.crt` in Safari, tap through the
+   warning and allow the download.
+2. **Settings → General → VPN & Device Management**: install *DTX Web Player dev CA*.
+3. **Settings → General → About → Certificate Trust Settings**: turn on full trust.
+
+The server certificate is re-issued automatically when the Mac's IP changes;
+the CA stays, so devices stay trusted. The dev server hides `sw.js` so edits
+aren't served from the offline cache; pass `--sw` to test offline mode.
+
 ## Usage
 
 - **Import ZIP / GP** — pick one or more `.zip` files, each containing `.dtx` chart(s)
   and their audio files (subfolders are fine; Shift-JIS file names are handled).
+  Background videos (`.avi`, `.mp4`, …) are skipped, since the player doesn't
+  show them; **Settings → Storage** can keep them, shows how much space the
+  library uses, and removes videos already stored.
   The same button accepts **Guitar Pro** files (`.gp`, `.gp3`, `.gp4`, `.gp5`,
   `.gpx`): each drum track becomes a chart, with repeats and D.S./coda jumps
   played out in order, voiced by a built-in synthesized drum kit.

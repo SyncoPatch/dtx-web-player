@@ -102,6 +102,24 @@ export async function deleteSong(songId) {
   });
 }
 
+// Every stored song file as { songId, path, size }, for storage accounting.
+// Walks a cursor and reads only blob.size, never the file data.
+export async function listFileMeta() {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const out = [];
+    const r = db.transaction('files').objectStore('files').openCursor();
+    r.onsuccess = () => {
+      const c = r.result;
+      if (!c) { resolve(out); return; }
+      const v = c.value;
+      out.push({ songId: v.songId, path: v.path, size: v.blob?.size || 0 });
+      c.continue();
+    };
+    r.onerror = () => reject(r.error);
+  });
+}
+
 // ---- skins ----
 
 export async function listSkins() {
