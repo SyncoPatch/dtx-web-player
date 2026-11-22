@@ -149,7 +149,9 @@ repeat), or click the value and type any number in range.
   is played as silent bars before the start point instead; the notes scroll
   in and earlier ones are dimmed. **Count in on** picks when: **Start**
   (from the top and Restart, and the clicks over the intro), **After pause**
-  (Play from anywhere else), **Loop passes**. Seeking while playing and
+  (Play from anywhere else), **Loop passes** (each pass, and with a loop on,
+  Play after a pause goes back to the loop start and counts in; Restart
+  still goes to the top). Seeking while playing and
   speed changes don't count in; a change made while playing applies from
   the next Play. Each song keeps its own setting (shared by its
   charts); **Count-in volume** is global.

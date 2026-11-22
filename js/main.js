@@ -1757,7 +1757,7 @@ $('btn-restart').onclick = () => {
   // From the top, with the count-in (also when restarting mid-song).
   player.pause({ keepOutput: true });
   player.seek(0);
-  player.play({ countIn: true });
+  player.play({ countIn: 'start' }); // the top, even with a loop on
   el.btnPlay.textContent = 'Pause';
 };
 

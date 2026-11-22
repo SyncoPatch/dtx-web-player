@@ -547,21 +547,29 @@ export class Player {
   }
 
   // countIn: true for a user-started Play (from the top = 'start', else
-  // 'resume'), 'loop' for a loop pass; the song's count-in settings say
-  // which of these count in. false = an internal restart (seek while
-  // playing, speed change): no pre-roll, and intro clicks stay as they were.
+  // 'resume'; with a practice loop on and the song's loop count-in on, it
+  // goes back to the loop start as a 'loop' pass), 'start' for Restart,
+  // 'loop' for a loop pass; the song's count-in settings say which of these
+  // count in. false = an internal restart (seek while playing, speed
+  // change): no pre-roll, and intro clicks stay as they were.
   async play({ countIn = false } = {}) {
     if (this.playing || !this.chips.length) return;
     clearTimeout(this._releaseTimer);
     this._releaseTimer = null;
     await this._ensureRunning();
     if (this.playing) return; // a second play() finished first
+    if (countIn === true && this.loop?.enabled && this._ci?.on.loop) {
+      this.pausedAt = Math.max(0, Math.min(this.loop.startTime, this.duration));
+      this._tabScroll = 0;
+      countIn = 'loop';
+    }
     if (this.pausedAt >= this.duration - 0.05) this.pausedAt = 0;
 
     this.startOffset = this.pausedAt;
     const intro = this._intro;
     const chart = { bars: this.bars, bpm: this._bpm0, bpmChanges: this._bpmChanges };
-    const trigger = countIn === 'loop' ? 'loop' : countIn ? (this.startOffset <= 1e-3 ? 'start' : 'resume') : null;
+    const trigger = countIn === 'loop' || countIn === 'start' ? countIn
+      : countIn ? (this.startOffset <= 1e-3 ? 'start' : 'resume') : null;
     const allowed = !!(trigger && this._ci?.on[trigger]);
     // The clicks over the intro are the count-in from the start: whenever
     // playback is still before the entry bar (from the top, or resumed in
