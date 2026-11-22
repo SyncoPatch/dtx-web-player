@@ -74,8 +74,7 @@ const settings = {
   gpFeet: { kickSplit: true, hhClose: true }, // last choice in the GP import dialog
   keepVideos: false, // store BGA videos found in imports (they aren't played)
   libSort: 'title',  // library order: title | artist | level | bpm | added
-  countIn: 0,        // bars of clicks before Play and each loop pass (0 = off)
-  volClick: 0.8,     // count-in click volume
+  volClick: 0.8,     // count-in click volume (the count-in itself is per song)
 };
 try {
   const saved = JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{}');
@@ -118,7 +117,6 @@ function applySettings(p) {
   p.setBgmVolume(settings.volBgm);
   p.setNotesVolume(settings.volNotes);
   p.setClickVolume(settings.volClick);
-  p.countInBars = settings.countIn;
   p.setColors(settings.colors);
   p.setDisplay(settings.display);
   p.setGroups(settings.groups);       // rebuilds lanes,
@@ -1425,6 +1423,7 @@ async function openChart(song, chartInfo, { fileMap = null, at = 0, autoplay = t
 
     const shownBpm = await gpDisplayInfo(song, chartInfo, fileMap, dtx);
     const resolve = makeResolver(fileMap, dirname(chartInfo.path));
+    player.setCountIn(song.countIn || null);
     const { missing, failed } = await player.load(dtx, resolve, (done, total) => {
       el.overlayText.textContent = `Decoding audio ${done} / ${total}…`;
     });
@@ -2278,21 +2277,7 @@ function buildPlaybackSection() {
   const c = makeStepper('offsetChart');
   c.el.title = 'Extra offset for the currently open chart, added on top of the global display offset (song-time ms, scales with play speed)';
   row('Chart offset', c.el);
-  const ci = document.createElement('select');
-  for (const [v, text] of [[0, 'Off'], [1, '1 bar'], [2, '2 bars'], [4, '4 bars']]) {
-    const o = document.createElement('option');
-    o.value = String(v);
-    o.textContent = text;
-    ci.append(o);
-  }
-  ci.value = String(settings.countIn);
-  ci.title = 'Clicks counted in before Play, Restart and each practice-loop pass, at the tempo and meter where playback starts';
-  ci.onchange = () => {
-    settings.countIn = Number(ci.value);
-    saveSettings();
-    if (player) player.countInBars = settings.countIn;
-  };
-  row('Count-in', ci);
+  buildCountInRows(row, wrap);
   for (const [key, text] of [['volClick', 'Count-in volume'], ['volNotes', 'Notes volume'], ['volBgm', 'BGM volume'], ['volMaster', 'Master volume']]) {
     const input = document.createElement('input');
     input.type = 'range';
@@ -2303,6 +2288,81 @@ function buildPlaybackSection() {
     input.oninput = () => setVolumeSetting(key, parseFloat(input.value));
     volEls[key].push(input);
     row(text, input);
+  }
+}
+
+// Per-song count-in: how many bars, and the bar you come in at. The clicks
+// play over the bars before it while the music runs; starting at or after
+// it (Play, Restart, a loop pass) counts in with silent bars instead.
+function buildCountInRows(row, wrap) {
+  if (!current || !player) {
+    const n = document.createElement('p');
+    n.className = 'panel-note';
+    n.textContent = 'Count-in: open a song to set it (each song keeps its own).';
+    wrap.append(n);
+    return;
+  }
+  const cfg = current.song.countIn || { bars: 0, entry: null };
+  const bars = document.createElement('select');
+  for (const [v, text] of [[0, 'Off'], [1, '1 bar'], [2, '2 bars'], [4, '4 bars']]) {
+    const o = document.createElement('option');
+    o.value = String(v);
+    o.textContent = text;
+    bars.append(o);
+  }
+  bars.value = String(cfg.bars || 0);
+  bars.title = 'Clicks before the bar you come in at, for this song (all its charts)';
+
+  const entryWrap = document.createElement('span');
+  entryWrap.className = 'countin-entry';
+  const entry = document.createElement('input');
+  entry.type = 'number';
+  entry.min = '0';
+  entry.step = '1';
+  entry.inputMode = 'numeric';
+  entry.value = cfg.entry ?? '';
+  entry.placeholder = `Auto (${String(player.autoEntryNum()).padStart(3, '0')})`;
+  entry.title = 'Measure number where you come in, as the lanes show it. Empty = Auto: the first measure with drum notes.';
+  const here = document.createElement('button');
+  here.className = 'btn small';
+  here.textContent = 'Playhead';
+  here.title = 'Come in at the measure under the playhead';
+  entryWrap.append(entry, here);
+
+  const save = () => {
+    const v = entry.value.trim();
+    const next = {
+      bars: Number(bars.value),
+      entry: v === '' || !Number.isFinite(Number(v)) ? null : Math.max(0, Math.round(Number(v))),
+    };
+    saveSongCountIn(next);
+  };
+  bars.onchange = save;
+  entry.onchange = save;
+  here.onclick = () => {
+    entry.value = String(player.barNumAt(player.time));
+    save();
+  };
+  row('Count-in', bars);
+  row('Enter at bar', entryWrap);
+  entryWrap.parentElement.hidden = !cfg.bars;
+  bars.addEventListener('change', () => { entryWrap.parentElement.hidden = !Number(bars.value); });
+}
+
+async function saveSongCountIn(cfg) {
+  if (!current) return;
+  const { song } = current;
+  const value = cfg.bars ? cfg : null;
+  song.countIn = value;
+  player?.setCountIn(value);
+  try {
+    await patchSong(song.id, (s) => {
+      if (value) s.countIn = value;
+      else delete s.countIn;
+    });
+  } catch (err) {
+    console.error(err);
+    alert(`Couldn\u2019t save the count-in:\n${err.message}`);
   }
 }
 
