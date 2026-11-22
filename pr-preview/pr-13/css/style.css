@@ -298,6 +298,8 @@ button, input, select { touch-action: manipulation; }
 }
 #playback-opts .display-row > :last-child { margin-left: auto; }
 .countin-entry { display: flex; align-items: center; gap: 6px; }
+.countin-when { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 4px 10px; font-size: 12px; }
+.countin-when label { display: flex; align-items: center; gap: 3px; cursor: pointer; white-space: nowrap; }
 .countin-entry input {
   width: 92px;
   background: var(--panel2); color: var(--text);
