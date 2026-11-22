@@ -566,10 +566,12 @@ export class Player {
     if (trigger) this._introOn = allowed;
     let plan = null;
     if (allowed && intro) {
-      // At or after the entry: the full count-in as silent pre-roll. From
-      // the top with too short an intro: pre-roll for the missing bars.
-      if (this.startOffset >= intro.entryTime - 1e-6) plan = countInPlan(chart, this.startOffset, this._ci.bars);
-      else if (this.startOffset <= 1e-3 && intro.missing > 0) plan = countInPlan(chart, 0, intro.missing);
+      // From the top before the entry, the clicks over the intro count you
+      // in (plus pre-roll for bars a short intro lacks). Anything else —
+      // resuming after a pause, a loop pass, the top at/after the entry —
+      // gets the full count-in as silent pre-roll at the start point.
+      if (trigger !== 'start' || this.startOffset >= intro.entryTime - 1e-6) plan = countInPlan(chart, this.startOffset, this._ci.bars);
+      else if (intro.missing > 0) plan = countInPlan(chart, 0, intro.missing);
     }
     this._countIn = plan ? { start: this.startOffset, plan } : null;
     // Intro clicks still ahead are scheduled like chips (see _tick).
