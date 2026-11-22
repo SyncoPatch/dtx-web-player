@@ -49,3 +49,39 @@ test('no bars falls back to 4/4', () => {
   close(p.seconds, 2.4);
   assert.equal(p.clicks.length, 4);
 });
+
+import { entryBarIndex, introClicks } from '../js/countin.js';
+
+// 120 BPM 4/4 bars of 2 s; bar 2 is 3/4 (1.5 s) and bar 3 is at 60 BPM (4 s).
+const BARS = [
+  { time: 0, num: 0, beats: 4 }, { time: 2, num: 1, beats: 4 }, { time: 4, num: 2, beats: 3 },
+  { time: 5.5, num: 3, beats: 4 }, { time: 9.5, num: 4, beats: 4 }, { time: 11.5, num: 5, beats: 4 },
+];
+
+test('entryBarIndex: Auto = first drum bar; a number = that measure or the next', () => {
+  const chips = [{ time: 0, visible: false }, { time: 9.6, visible: true }];
+  assert.equal(entryBarIndex(BARS, chips, null), 4);
+  assert.equal(entryBarIndex(BARS, [], null), 0);
+  assert.equal(entryBarIndex(BARS, chips, 2), 2);
+  assert.equal(entryBarIndex(BARS, chips, 99), 5);
+  const lead = BARS.map((b) => ({ ...b, num: b.num + 1 })); // lead-in shifted numbers
+  assert.equal(entryBarIndex(lead, chips, 0), 0);
+});
+
+test('introClicks: each intro bar keeps its own meter and tempo', () => {
+  const r = introClicks(BARS, 4, 2);
+  assert.equal(r.missing, 0);
+  close(r.entryTime, 9.5);
+  assert.deepEqual(r.clicks.map((c) => c.t), [4, 4.5, 5, 5.5, 6.5, 7.5, 8.5]);
+  assert.deepEqual(r.clicks.map((c) => c.beat), [1, 2, 3, 1, 2, 3, 4]);
+  assert.deepEqual(r.clicks.filter((c) => c.accent).map((c) => c.t), [4, 5.5]);
+});
+
+test('introClicks: a short intro reports the missing bars', () => {
+  const r = introClicks(BARS, 1, 2);
+  assert.equal(r.missing, 1);
+  assert.equal(r.clicks.length, 4);
+  const none = introClicks(BARS, 0, 2);
+  assert.equal(none.missing, 2);
+  assert.equal(none.clicks.length, 0);
+});

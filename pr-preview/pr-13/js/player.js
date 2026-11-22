@@ -8,7 +8,7 @@
 import { SoundBank } from './audio.js';
 import { Stretcher } from './stretch.js';
 import { assignSlices } from './stemslice.js';
-import { countInPlan } from './countin.js';
+import { countInPlan, entryBarIndex, introClicks } from './countin.js';
 
 // Note types the user can color independently. Colors are kept per type even
 // when lanes are grouped, so e.g. RD chips stay distinguishable on the CY lane.
@@ -199,11 +199,17 @@ export class Player {
     this.pausedAt = 0;
     this.startOffset = 0;
     this.ctxStart = 0;
-    // Count-in: bars of clicks before a user-started Play and each loop pass
-    // (0 = off). While counting in, _countIn = { start, plan } and song time
-    // runs from start - plan.seconds up to start.
-    this.countInBars = 0;
+    // Count-in (per song, setCountIn): clicks over the bars before the entry
+    // bar while the music plays (_intro), plus silent pre-roll when starting
+    // at or after the entry, or when the intro is too short. While in the
+    // pre-roll, _countIn = { start, plan } and song time runs from
+    // start - plan.seconds up to start. _countView = { clicks, end } drives
+    // the beat number on screen.
+    this._ci = null;
+    this._intro = null;
+    this._clickIdx = 0;
     this._countIn = null;
+    this._countView = null;
     this._bpm0 = 120;
     this._bpmChanges = [];
     this.speed = 1.0;      // scroll speed (visual only)
@@ -511,6 +517,8 @@ export class Player {
     this._bpm0 = dtx.bpm;
     this._bpmChanges = dtx.bpmChanges || [];
     this._countIn = null;
+    this._countView = null;
+    this._computeIntro();
     this.loop = null;
     this.onLoopChange?.(null);
     this._rebuildLanes();
@@ -536,7 +544,7 @@ export class Player {
     return assignSlices(this.chips, bgmTime, data);
   }
 
-  // countIn: play countInBars bars of clicks first (a user-started Play or a
+  // countIn: allow the song's count-in pre-roll (a user-started Play or a
   // loop pass). Internal restarts (seek while playing, speed change) don't.
   async play({ countIn = false } = {}) {
     if (this.playing || !this.chips.length) return;
@@ -547,10 +555,27 @@ export class Player {
     if (this.pausedAt >= this.duration - 0.05) this.pausedAt = 0;
 
     this.startOffset = this.pausedAt;
-    const plan = countIn
-      ? countInPlan({ bars: this.bars, bpm: this._bpm0, bpmChanges: this._bpmChanges }, this.startOffset, this.countInBars)
-      : null;
+    const intro = this._intro;
+    const chart = { bars: this.bars, bpm: this._bpm0, bpmChanges: this._bpmChanges };
+    let plan = null;
+    if (countIn && intro) {
+      // At or after the entry: the full count-in as silent pre-roll. From
+      // the top with too short an intro: pre-roll for the missing bars.
+      if (this.startOffset >= intro.entryTime - 1e-6) plan = countInPlan(chart, this.startOffset, this._ci.bars);
+      else if (this.startOffset <= 1e-3 && intro.missing > 0) plan = countInPlan(chart, 0, intro.missing);
+    }
     this._countIn = plan ? { start: this.startOffset, plan } : null;
+    // Intro clicks still ahead are scheduled like chips (see _tick).
+    this._clickIdx = 0;
+    const introAhead = [];
+    if (intro) {
+      while (this._clickIdx < intro.clicks.length && intro.clicks[this._clickIdx].t < this.startOffset - 1e-6) this._clickIdx++;
+      if (this.startOffset < intro.entryTime - 1e-6) introAhead.push(...intro.clicks.slice(this._clickIdx));
+    }
+    const shown = [...(plan?.clicks || []), ...introAhead];
+    this._countView = shown.length
+      ? { clicks: shown, end: introAhead.length ? intro.entryTime : this.startOffset }
+      : null;
     this.ctxStart = this.ctx.currentTime + START_DELAY + (plan ? plan.seconds / this.playSpeed : 0);
     this.playing = true;
     if (plan) {
@@ -591,6 +616,7 @@ export class Player {
     // Paused during a count-in: stay at the start point.
     this.pausedAt = Math.min(Math.max(this.time, this._countIn?.start ?? -Infinity), this.duration);
     this._countIn = null;
+    this._countView = null;
     this.playing = false;
     clearInterval(this._schedTimer);
     this._schedTimer = null;
@@ -992,6 +1018,11 @@ export class Player {
       const c = this.chips[this._schedIdx++];
       this._playChip(c, this.ctxStart + (c.time - this.startOffset) / this.playSpeed, 0);
     }
+    const ic = this._intro?.clicks;
+    while (ic && this._clickIdx < ic.length && ic[this._clickIdx].t < horizon) {
+      const c = ic[this._clickIdx++];
+      this._playClick(this.ctxStart + (c.t - this.startOffset) / this.playSpeed, c.accent);
+    }
   }
 
   // Back to the loop start for the next pass, with a count-in.
@@ -1001,6 +1032,31 @@ export class Player {
     this._tabScroll = 0;
     this._resetPointers(this.pausedAt);
     this.play({ countIn: true });
+  }
+
+  // Per-song count-in: { bars: 1|2|4, entry: null (Auto) | measure number },
+  // or null for none. Kept across load() of the same song's charts.
+  setCountIn(cfg) {
+    this._ci = cfg?.bars > 0 ? { bars: cfg.bars, entry: cfg.entry ?? null } : null;
+    this._computeIntro();
+  }
+
+  _computeIntro() {
+    if (!this._ci || !this.bars.length) { this._intro = null; return; }
+    this._entryIdx = entryBarIndex(this.bars, this.chips, this._ci.entry);
+    this._intro = introClicks(this.bars, this._entryIdx, this._ci.bars);
+  }
+
+  // Measure number (bar.num) of the bar you'd come in at with entry Auto.
+  autoEntryNum() {
+    return this.bars[entryBarIndex(this.bars, this.chips, null)]?.num ?? 0;
+  }
+
+  // Measure number under the playhead.
+  barNumAt(t) {
+    let i = 0;
+    while (i + 1 < this.bars.length && this.bars[i + 1].time <= t + 1e-6) i++;
+    return this.bars[i]?.num ?? 0;
   }
 
   setClickVolume(v) {
@@ -1150,7 +1206,7 @@ export class Player {
       g.fillRect(0, this.tabPos === 'top' ? region.h - 1 : region.top, W, 1);
     }
 
-    if (this.countingIn) this._renderCountIn(g, W, H);
+    if (this._countView && this.playing && this.time < this._countView.end) this._renderCountIn(g, W, H);
 
     this.onFrame?.(this);
   };
@@ -1158,12 +1214,12 @@ export class Player {
   // The count-in beat number ("1 2 3 4"), fading over each beat.
   _renderCountIn(g, W, H) {
     const t = this.time;
-    const clicks = this._countIn.plan.clicks;
+    const { clicks, end } = this._countView;
     let i = -1;
     while (i + 1 < clicks.length && clicks[i + 1].t <= t) i++;
     if (i < 0) return;
     const c = clicks[i];
-    const next = clicks[i + 1]?.t ?? this._countIn.start;
+    const next = clicks[i + 1]?.t ?? end;
     const p = Math.min(1, (t - c.t) / Math.max(0.05, next - c.t));
     const size = Math.round(Math.min(W, H) * 0.2);
     g.save();

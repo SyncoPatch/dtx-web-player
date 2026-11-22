@@ -136,12 +136,18 @@ Scroll, play speed and offsets are adjusted with −/+ steppers (hold to
 repeat), or click the value and type any number in range.
 
 - **Scroll** (0.25x–10x, 0.25 steps) — visual note-scroll speed.
-- **Count-in** (Off / 1 / 2 / 4 bars) — clicks counted in before Play,
-  Restart and every pass of a practice loop, at the tempo and meter where
-  playback starts (one click per quarter note, beat 1 accented, a big beat
-  number on screen). The notes scroll in during the count; earlier notes are
-  dimmed and don't play. Seeking while playing and speed changes don't count
-  in. **Count-in volume** sets the click level.
+- **Count-in** (per song, with a chart open: Off / 1 / 2 / 4 bars) — clicks
+  that count you in at the bar where you come in. **Enter at bar** is Auto
+  (the first measure with drum notes) or a measure number as the lanes show
+  it (**Playhead** picks the one under the playhead). The clicks play over
+  the bars before it while the music runs, one per quarter note in each
+  bar's own meter, beat 1 accented, with a big beat number on screen. When
+  the intro is shorter than the count-in, or you start at or after that bar
+  (Play, Restart, each pass of a practice loop), silent bars are added
+  before the start point instead; the notes scroll in and earlier ones are
+  dimmed. Seeking while playing and speed changes don't count in. Each song
+  keeps its own setting (shared by its charts); **Count-in volume** is
+  global.
 - **Play speed** (0.25x–2x, 0.05 steps) — actual playback tempo with **pitch-preserving
   time stretch**: the chart and audio slow down together while the on-screen
   scroll velocity stays the same, so notes spread out instead of crawling.

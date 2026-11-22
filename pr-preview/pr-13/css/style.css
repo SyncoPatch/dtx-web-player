@@ -297,6 +297,13 @@ button, input, select { touch-action: manipulation; }
   font-size: 13px; cursor: pointer;
 }
 #playback-opts .display-row > :last-child { margin-left: auto; }
+.countin-entry { display: flex; align-items: center; gap: 6px; }
+.countin-entry input {
+  width: 92px;
+  background: var(--panel2); color: var(--text);
+  border: 1px solid var(--border); border-radius: 4px;
+  font-size: 12px; padding: 3px 6px;
+}
 .panel-box select {
   margin-left: auto;
   background: var(--panel2); color: var(--text);

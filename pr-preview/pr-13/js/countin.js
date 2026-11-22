@@ -37,3 +37,38 @@ export function countInPlan({ bars = [], bpm = 120, bpmChanges = [] }, t, n) {
   }
   return { seconds, clicks };
 }
+
+// The bar you come in at: entry = null means Auto, the first measure with a
+// visible drum note; otherwise a measure number as the lanes show it
+// (bar.num), or the nearest bar after it. Returns a bar index.
+export function entryBarIndex(bars, chips, entry) {
+  if (!bars.length) return 0;
+  const barAt = (t) => {
+    let i = 0;
+    while (i + 1 < bars.length && bars[i + 1].time <= t + EPS) i++;
+    return i;
+  };
+  if (entry == null) {
+    const first = chips.find((c) => c.visible);
+    return first ? barAt(first.time) : 0;
+  }
+  const i = bars.findIndex((b) => b.num >= entry);
+  return i < 0 ? bars.length - 1 : i;
+}
+
+// Clicks over the n bars before the entry bar, while the music plays: one
+// per quarter note of each bar's own length (its meter and tempo), beat 1
+// accented. missing = bars the chart doesn't have before the entry (they
+// become silent pre-roll before 0). entryTime = where you come in.
+export function introClicks(bars, entryIdx, n) {
+  const clicks = [];
+  const from = Math.max(0, entryIdx - n);
+  for (let i = from; i < entryIdx; i++) {
+    const quarters = bars[i].beats > 0 ? bars[i].beats : 4;
+    const q = (bars[i + 1].time - bars[i].time) / quarters;
+    for (let k = 0; k < quarters - EPS; k++) {
+      clicks.push({ t: bars[i].time + k * q, accent: k === 0, beat: k + 1 });
+    }
+  }
+  return { clicks, missing: Math.max(0, n - entryIdx), entryTime: bars[entryIdx]?.time ?? 0 };
+}
