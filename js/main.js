@@ -74,6 +74,7 @@ const settings = {
   gpFeet: { kickSplit: true, hhClose: true }, // last choice in the GP import dialog
   keepVideos: false, // store BGA videos found in imports (they aren't played)
   libSort: 'title',  // library order: title | artist | level | bpm | added
+  volClick: 0.8,     // count-in click volume (the count-in itself is per song)
 };
 try {
   const saved = JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{}');
@@ -115,6 +116,7 @@ function applySettings(p) {
   p.setVolume(settings.volMaster);
   p.setBgmVolume(settings.volBgm);
   p.setNotesVolume(settings.volNotes);
+  p.setClickVolume(settings.volClick);
   p.setColors(settings.colors);
   p.setDisplay(settings.display);
   p.setGroups(settings.groups);       // rebuilds lanes,
@@ -1421,6 +1423,7 @@ async function openChart(song, chartInfo, { fileMap = null, at = 0, autoplay = t
 
     const shownBpm = await gpDisplayInfo(song, chartInfo, fileMap, dtx);
     const resolve = makeResolver(fileMap, dirname(chartInfo.path));
+    player.setCountIn(song.countIn || null);
     const { missing, failed } = await player.load(dtx, resolve, (done, total) => {
       el.overlayText.textContent = `Decoding audio ${done} / ${total}…`;
     });
@@ -1468,7 +1471,7 @@ async function openChart(song, chartInfo, { fileMap = null, at = 0, autoplay = t
       el.btnPlay.textContent = 'Play';
       return;
     }
-    await player.play();
+    await player.play({ countIn: true });
     el.btnPlay.textContent = 'Pause';
 
     // iOS: if decoding took long enough that the resume fell outside the
@@ -1532,7 +1535,7 @@ $('btn-play').onclick = async () => {
     player.pause();
     el.btnPlay.textContent = 'Play';
   } else {
-    await player.play();
+    await player.play({ countIn: true });
     el.btnPlay.textContent = 'Pause';
   }
 };
@@ -1751,11 +1754,11 @@ $('btn-loop-clear').onclick = () => player?.clearLoop();
 
 $('btn-restart').onclick = () => {
   if (!player) return;
+  // From the top, with the count-in (also when restarting mid-song).
+  player.pause({ keepOutput: true });
   player.seek(0);
-  if (!player.playing) {
-    player.play();
-    el.btnPlay.textContent = 'Pause';
-  }
+  player.play({ countIn: 'start' }); // the top, even with a loop on
+  el.btnPlay.textContent = 'Pause';
 };
 
 el.seek.addEventListener('pointerdown', () => { seeking = true; });
@@ -1768,7 +1771,7 @@ el.seek.addEventListener('change', () => {
 // ---- shared setting setters (keep the bottom bar and the panel in sync) ----
 
 const steppers = { scroll: [], playSpeed: [], offsetGlobal: [], offsetChart: [], tabZoom: [], syncCoarse: [], syncFine: [], feetRun: [] };
-const volEls = { volMaster: [], volBgm: [], volNotes: [] }; // range inputs
+const volEls = { volMaster: [], volBgm: [], volNotes: [], volClick: [] }; // range inputs
 
 function refreshSteppers(key) {
   steppers[key] = steppers[key].filter((s) => s.el.isConnected);
@@ -1832,6 +1835,7 @@ const VOL_APPLY = {
   volMaster: (p, v) => p.setVolume(v),
   volBgm: (p, v) => p.setBgmVolume(v),
   volNotes: (p, v) => p.setNotesVolume(v),
+  volClick: (p, v) => p.setClickVolume(v),
 };
 
 function setVolumeSetting(key, v) {
@@ -2273,7 +2277,8 @@ function buildPlaybackSection() {
   const c = makeStepper('offsetChart');
   c.el.title = 'Extra offset for the currently open chart, added on top of the global display offset (song-time ms, scales with play speed)';
   row('Chart offset', c.el);
-  for (const [key, text] of [['volNotes', 'Notes volume'], ['volBgm', 'BGM volume'], ['volMaster', 'Master volume']]) {
+  buildCountInRows(row, wrap);
+  for (const [key, text] of [['volClick', 'Count-in volume'], ['volNotes', 'Notes volume'], ['volBgm', 'BGM volume'], ['volMaster', 'Master volume']]) {
     const input = document.createElement('input');
     input.type = 'range';
     input.min = '0';
@@ -2283,6 +2288,105 @@ function buildPlaybackSection() {
     input.oninput = () => setVolumeSetting(key, parseFloat(input.value));
     volEls[key].push(input);
     row(text, input);
+  }
+}
+
+// Per-song count-in: how many bars, and the bar you come in at. The clicks
+// play over the bars before it while the music runs; starting at or after
+// it (Play, Restart, a loop pass) counts in with silent bars instead.
+function buildCountInRows(row, wrap) {
+  if (!current || !player) {
+    const n = document.createElement('p');
+    n.className = 'panel-note';
+    n.textContent = 'Count-in: open a song to set it (each song keeps its own).';
+    wrap.append(n);
+    return;
+  }
+  const cfg = current.song.countIn || { bars: 0, entry: null };
+  const on = { start: true, resume: true, loop: true, ...cfg.on };
+  const bars = document.createElement('select');
+  for (const [v, text] of [[0, 'Off'], [1, '1 bar'], [2, '2 bars'], [4, '4 bars']]) {
+    const o = document.createElement('option');
+    o.value = String(v);
+    o.textContent = text;
+    bars.append(o);
+  }
+  bars.value = String(cfg.bars || 0);
+  bars.title = 'Clicks before the bar you come in at, for this song (all its charts)';
+
+  const entryWrap = document.createElement('span');
+  entryWrap.className = 'countin-entry';
+  const entry = document.createElement('input');
+  entry.type = 'number';
+  entry.min = '0';
+  entry.step = '1';
+  entry.inputMode = 'numeric';
+  entry.value = cfg.entry ?? '';
+  entry.placeholder = `Auto (${String(player.autoEntryNum()).padStart(3, '0')})`;
+  entry.title = 'Measure number where you come in, as the lanes show it. Empty = Auto: the first measure with drum notes.';
+  const here = document.createElement('button');
+  here.className = 'btn small';
+  here.textContent = 'Playhead';
+  here.title = 'Come in at the measure under the playhead';
+  entryWrap.append(entry, here);
+
+  // When to count in.
+  const when = document.createElement('span');
+  when.className = 'countin-when';
+  const boxes = {};
+  for (const [key, text, title] of [
+    ['start', 'Start', 'Playing from the top, and Restart'],
+    ['resume', 'After pause', 'Play from anywhere else'],
+    ['loop', 'Loop passes', 'Each pass of a practice loop'],
+  ]) {
+    const label = document.createElement('label');
+    const box = document.createElement('input');
+    box.type = 'checkbox';
+    box.checked = on[key];
+    label.title = title;
+    label.append(box, ` ${text}`);
+    when.append(label);
+    boxes[key] = box;
+  }
+
+  const save = () => {
+    const v = entry.value.trim();
+    const next = {
+      bars: Number(bars.value),
+      entry: v === '' || !Number.isFinite(Number(v)) ? null : Math.max(0, Math.round(Number(v))),
+      on: { start: boxes.start.checked, resume: boxes.resume.checked, loop: boxes.loop.checked },
+    };
+    saveSongCountIn(next);
+  };
+  for (const b of Object.values(boxes)) b.onchange = save;
+  bars.onchange = save;
+  entry.onchange = save;
+  here.onclick = () => {
+    entry.value = String(player.barNumAt(player.time));
+    save();
+  };
+  row('Count-in', bars);
+  row('Enter at bar', entryWrap);
+  row('Count in on', when);
+  const extra = [entryWrap.parentElement, when.parentElement];
+  for (const r of extra) r.hidden = !cfg.bars;
+  bars.addEventListener('change', () => { for (const r of extra) r.hidden = !Number(bars.value); });
+}
+
+async function saveSongCountIn(cfg) {
+  if (!current) return;
+  const { song } = current;
+  const value = cfg.bars ? cfg : null;
+  song.countIn = value;
+  player?.setCountIn(value);
+  try {
+    await patchSong(song.id, (s) => {
+      if (value) s.countIn = value;
+      else delete s.countIn;
+    });
+  } catch (err) {
+    console.error(err);
+    alert(`Couldn\u2019t save the count-in:\n${err.message}`);
   }
 }
 
