@@ -141,15 +141,17 @@ repeat), or click the value and type any number in range.
   (the first measure with drum notes) or a measure number as the lanes show
   it (**Playhead** picks the one under the playhead). The clicks play over
   the bars before it while the music runs, one per quarter note in each
-  bar's own meter, beat 1 accented, with a big beat number on screen. That's
-  for playing from the top; when the intro is shorter than the count-in,
-  silent bars make up the difference. Resuming after a pause (anywhere, the
-  intro included), each pass of a practice loop, and playing from the top at
-  or after that bar get the full count-in as silent bars before the start
-  point; the notes scroll in and earlier ones are dimmed. **Count in on** picks when: **Start** (from the top, and Restart),
-  **After pause** (Play from anywhere else), **Loop passes**. Seeking while
-  playing and speed changes don't count in; a change made while playing
-  applies from the next Play. Each song keeps its own setting (shared by its
+  bar's own meter, beat 1 accented, with a big beat number on screen. They
+  are the count-in from the start, so they also play when you pause in the
+  intro and resume before that bar. When the intro is shorter than the
+  count-in, silent bars make up the difference; when you start at or after
+  that bar (Play, Restart, each pass of a practice loop), the full count-in
+  is played as silent bars before the start point instead; the notes scroll
+  in and earlier ones are dimmed. **Count in on** picks when: **Start**
+  (from the top and Restart, and the clicks over the intro), **After pause**
+  (Play from anywhere else), **Loop passes**. Seeking while playing and
+  speed changes don't count in; a change made while playing applies from
+  the next Play. Each song keeps its own setting (shared by its
   charts); **Count-in volume** is global.
 - **Play speed** (0.25x–2x, 0.05 steps) — actual playback tempo with **pitch-preserving
   time stretch**: the chart and audio slow down together while the on-screen
