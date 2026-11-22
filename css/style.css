@@ -484,3 +484,36 @@ input[type="range"] { accent-color: var(--accent); }
   #song-list { padding: 12px 16px; grid-template-columns: minmax(0, 1fr); }
   .lib-filters input { width: 52px; }
 }
+
+/* ---- chart editor ---- */
+#ed-info { display: flex; flex-direction: column; flex: 1; min-width: 0; }
+#ed-title { font-size: 16px; font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#ed-sub { font-size: 12px; color: var(--dim); }
+#ed-save.unsaved::after { content: " •"; }
+.ed-toolbar {
+  flex: 0 0 auto;
+  display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px;
+  padding: 8px 20px;
+  padding-left: calc(20px + env(safe-area-inset-left));
+  padding-right: calc(20px + env(safe-area-inset-right));
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+  font-size: 13px; color: var(--dim);
+}
+.ed-group { display: flex; align-items: center; gap: 4px; }
+.ed-toolbar select {
+  background: var(--panel2); color: var(--text);
+  border: 1px solid var(--border); border-radius: 4px;
+  font-size: 12px; padding: 3px 6px;
+}
+#ed-status { margin-left: auto; font-variant-numeric: tabular-nums; color: var(--dim); }
+#ed-wrap { flex: 1; min-height: 0; position: relative; padding-bottom: env(safe-area-inset-bottom); }
+#ed-canvas { display: block; width: 100%; height: 100%; touch-action: none; cursor: crosshair; }
+#ed-canvas.select { cursor: default; }
+@media (max-width: 640px) {
+  .ed-toolbar { padding-left: 16px; padding-right: 16px; gap: 6px 10px; }
+  #ed-status { width: 100%; margin-left: 0; }
+}
+.btn:disabled { opacity: 0.4; cursor: default; }
+.btn:disabled:hover { background: var(--panel2); border-color: var(--border); }
+.btn.primary:disabled:hover { background: var(--accent); border-color: var(--accent); }

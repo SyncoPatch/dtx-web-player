@@ -125,6 +125,25 @@ aren't served from the offline cache; pass `--sw` to test offline mode.
   DTXMania and re-imports here. Guitar Pro songs export their generated charts
   with the kit sounds, recording, stems and the original Guitar Pro file;
   re-imported, they become plain DTX songs (no re-alignment or foot editing).
+- **Chart editor** (a card's ⋯ menu → **Edit chart**, or **Edit** in the
+  player) — a DTXCreator-style grid with time running upward, for imported
+  DTX charts (editing Guitar Pro charts comes later).
+  - **Pen** (P): click to place a note on the snap grid, click a note to remove it.
+  - **Select** (V): click, shift-click or drag a box; drag notes to move them in
+    time and across lanes; arrow keys nudge.
+  - Tap the **HH** / **LP** labels (or press O / L) to switch between closed and
+    open hi-hat, and left pedal and left bass drum.
+  - **Snap** sets the grid, 1/4 to 1/192 including triplets (`[` `]`).
+  - Copy and paste (⌘C / ⌘V, pasted at the last clicked spot or the playhead),
+    Delete, undo and redo (⌘Z / ⇧⌘Z), zoom (+ / − or ⌘-wheel; pinch on touch).
+  - Drag the measure numbers to scroll; tap them to move the playhead.
+  - **Play** (Space) plays the chart as edited from the last clicked spot, with
+    a playhead that follows.
+  - **Save** (⌘S) writes the chart in place. The DTX file keeps everything the
+    editor doesn't touch: comments, unknown commands, BGM, BGA, sound effects
+    and the original resolution of every line. The first save keeps the
+    imported file, so **Revert to original** can restore it; exports never
+    include that copy.
 - Click a difficulty chip to play. Controls: play/pause (Space), restart, seek;
   Esc returns to the song list.
 

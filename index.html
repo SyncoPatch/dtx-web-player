@@ -110,6 +110,39 @@
   <input type="file" id="file-skin" accept=".zip,application/zip" hidden>
 </main>
 
+<main id="screen-editor" class="screen" hidden>
+  <header class="topbar">
+    <button id="ed-close" class="btn">&larr; Close</button>
+    <div id="ed-info">
+      <span id="ed-title"></span>
+      <span id="ed-sub"></span>
+    </div>
+    <button id="ed-revert" class="btn small" hidden title="Discard all saved edits and restore the chart as it was imported">Revert to original</button>
+    <button id="ed-save" class="btn primary" title="Save (⌘S / Ctrl+S)">Save</button>
+  </header>
+  <div class="ed-toolbar">
+    <span class="ed-group" role="group" aria-label="Tool">
+      <button class="btn small toggle" data-tool="pen" title="Pen: click to place a note, click a note to remove it (P)">Pen</button>
+      <button class="btn small toggle" data-tool="select" title="Select: click, shift-click or drag a box; drag notes to move them; arrows nudge (V)">Select</button>
+    </span>
+    <label class="ed-group">Snap <select id="ed-grid" title="Grid: steps per whole note ([ and ])"></select></label>
+    <span class="ed-group">
+      <button id="ed-undo" class="btn small" title="Undo (⌘Z)">Undo</button>
+      <button id="ed-redo" class="btn small" title="Redo (⇧⌘Z)">Redo</button>
+      <button id="ed-delete" class="btn small" title="Delete the selected notes (Delete)">Delete</button>
+      <button id="ed-copy" class="btn small" title="Copy the selected notes (⌘C)">Copy</button>
+      <button id="ed-paste" class="btn small" title="Paste at the last clicked spot or the playhead (⌘V)">Paste</button>
+    </span>
+    <span class="ed-group">
+      <button id="ed-zoom-out" class="btn small" title="Zoom out (−)">−</button>
+      <button id="ed-zoom-in" class="btn small" title="Zoom in (+)">+</button>
+    </span>
+    <button id="ed-play" class="btn small primary" title="Play from the last clicked spot (Space)">Play</button>
+    <span id="ed-status"></span>
+  </div>
+  <div id="ed-wrap"><canvas id="ed-canvas"></canvas></div>
+</main>
+
 <main id="screen-player" class="screen" hidden>
   <header class="topbar">
     <button id="btn-back" class="btn">&larr; Songs</button>
@@ -148,6 +181,7 @@
       </label>
       <button id="btn-image" class="btn small" title="View the whole chart as a static image">Chart</button>
       <button id="btn-pdf" class="btn small" title="Export this chart as printable sheet music (PDF)">PDF</button>
+      <button id="btn-edit" class="btn small" title="Edit this chart (opens the editor at the playhead)">Edit</button>
       <button id="btn-lanes" class="btn small">Settings&hellip;</button>
     </div>
   </div>
