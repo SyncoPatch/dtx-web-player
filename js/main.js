@@ -2303,6 +2303,7 @@ function buildCountInRows(row, wrap) {
     return;
   }
   const cfg = current.song.countIn || { bars: 0, entry: null };
+  const on = { start: true, resume: true, loop: true, ...cfg.on };
   const bars = document.createElement('select');
   for (const [v, text] of [[0, 'Off'], [1, '1 bar'], [2, '2 bars'], [4, '4 bars']]) {
     const o = document.createElement('option');
@@ -2329,14 +2330,35 @@ function buildCountInRows(row, wrap) {
   here.title = 'Come in at the measure under the playhead';
   entryWrap.append(entry, here);
 
+  // When to count in.
+  const when = document.createElement('span');
+  when.className = 'countin-when';
+  const boxes = {};
+  for (const [key, text, title] of [
+    ['start', 'Start', 'Playing from the top, and Restart'],
+    ['resume', 'After pause', 'Play from anywhere else'],
+    ['loop', 'Loop passes', 'Each pass of a practice loop'],
+  ]) {
+    const label = document.createElement('label');
+    const box = document.createElement('input');
+    box.type = 'checkbox';
+    box.checked = on[key];
+    label.title = title;
+    label.append(box, ` ${text}`);
+    when.append(label);
+    boxes[key] = box;
+  }
+
   const save = () => {
     const v = entry.value.trim();
     const next = {
       bars: Number(bars.value),
       entry: v === '' || !Number.isFinite(Number(v)) ? null : Math.max(0, Math.round(Number(v))),
+      on: { start: boxes.start.checked, resume: boxes.resume.checked, loop: boxes.loop.checked },
     };
     saveSongCountIn(next);
   };
+  for (const b of Object.values(boxes)) b.onchange = save;
   bars.onchange = save;
   entry.onchange = save;
   here.onclick = () => {
@@ -2345,8 +2367,10 @@ function buildCountInRows(row, wrap) {
   };
   row('Count-in', bars);
   row('Enter at bar', entryWrap);
-  entryWrap.parentElement.hidden = !cfg.bars;
-  bars.addEventListener('change', () => { entryWrap.parentElement.hidden = !Number(bars.value); });
+  row('Count in on', when);
+  const extra = [entryWrap.parentElement, when.parentElement];
+  for (const r of extra) r.hidden = !cfg.bars;
+  bars.addEventListener('change', () => { for (const r of extra) r.hidden = !Number(bars.value); });
 }
 
 async function saveSongCountIn(cfg) {

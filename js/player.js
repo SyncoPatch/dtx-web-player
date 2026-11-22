@@ -207,7 +207,9 @@ export class Player {
     // the beat number on screen.
     this._ci = null;
     this._intro = null;
+    this._introOn = false; // intro clicks enabled for the current run
     this._clickIdx = 0;
+    this._horizon = 0;     // song time scheduled up to (_tick)
     this._countIn = null;
     this._countView = null;
     this._bpm0 = 120;
@@ -544,8 +546,10 @@ export class Player {
     return assignSlices(this.chips, bgmTime, data);
   }
 
-  // countIn: allow the song's count-in pre-roll (a user-started Play or a
-  // loop pass). Internal restarts (seek while playing, speed change) don't.
+  // countIn: true for a user-started Play (from the top = 'start', else
+  // 'resume'), 'loop' for a loop pass; the song's count-in settings say
+  // which of these count in. false = an internal restart (seek while
+  // playing, speed change): no pre-roll, and intro clicks stay as they were.
   async play({ countIn = false } = {}) {
     if (this.playing || !this.chips.length) return;
     clearTimeout(this._releaseTimer);
@@ -557,8 +561,11 @@ export class Player {
     this.startOffset = this.pausedAt;
     const intro = this._intro;
     const chart = { bars: this.bars, bpm: this._bpm0, bpmChanges: this._bpmChanges };
+    const trigger = countIn === 'loop' ? 'loop' : countIn ? (this.startOffset <= 1e-3 ? 'start' : 'resume') : null;
+    const allowed = !!(trigger && this._ci?.on[trigger]);
+    if (trigger) this._introOn = allowed;
     let plan = null;
-    if (countIn && intro) {
+    if (allowed && intro) {
       // At or after the entry: the full count-in as silent pre-roll. From
       // the top with too short an intro: pre-roll for the missing bars.
       if (this.startOffset >= intro.entryTime - 1e-6) plan = countInPlan(chart, this.startOffset, this._ci.bars);
@@ -570,8 +577,9 @@ export class Player {
     const introAhead = [];
     if (intro) {
       while (this._clickIdx < intro.clicks.length && intro.clicks[this._clickIdx].t < this.startOffset - 1e-6) this._clickIdx++;
-      if (this.startOffset < intro.entryTime - 1e-6) introAhead.push(...intro.clicks.slice(this._clickIdx));
+      if (this._introOn && this.startOffset < intro.entryTime - 1e-6) introAhead.push(...intro.clicks.slice(this._clickIdx));
     }
+    this._horizon = this.startOffset;
     const shown = [...(plan?.clicks || []), ...introAhead];
     this._countView = shown.length
       ? { clicks: shown, end: introAhead.length ? intro.entryTime : this.startOffset }
@@ -1018,11 +1026,13 @@ export class Player {
       const c = this.chips[this._schedIdx++];
       this._playChip(c, this.ctxStart + (c.time - this.startOffset) / this.playSpeed, 0);
     }
-    const ic = this._intro?.clicks;
+    const ic = this._introOn ? this._intro?.clicks : null;
     while (ic && this._clickIdx < ic.length && ic[this._clickIdx].t < horizon) {
       const c = ic[this._clickIdx++];
-      this._playClick(this.ctxStart + (c.t - this.startOffset) / this.playSpeed, c.accent);
+      const when = this.ctxStart + (c.t - this.startOffset) / this.playSpeed;
+      if (when >= this.ctx.currentTime - 0.02) this._playClick(when, c.accent); // never a late click
     }
+    this._horizon = horizon;
   }
 
   // Back to the loop start for the next pass, with a count-in.
@@ -1031,14 +1041,22 @@ export class Player {
     this.pausedAt = Math.max(0, Math.min(this.loop.startTime, this.duration));
     this._tabScroll = 0;
     this._resetPointers(this.pausedAt);
-    this.play({ countIn: true });
+    this.play({ countIn: 'loop' });
   }
 
   // Per-song count-in: { bars: 1|2|4, entry: null (Auto) | measure number },
   // or null for none. Kept across load() of the same song's charts.
+  // cfg.on: { start, resume, loop } — when to count in (all by default).
   setCountIn(cfg) {
-    this._ci = cfg?.bars > 0 ? { bars: cfg.bars, entry: cfg.entry ?? null } : null;
+    this._ci = cfg?.bars > 0
+      ? { bars: cfg.bars, entry: cfg.entry ?? null, on: { start: true, resume: true, loop: true, ...cfg.on } }
+      : null;
     this._computeIntro();
+    // Changed while playing: carry on from what's already scheduled, so no
+    // past clicks fire. Takes full effect from the next Play.
+    const ic = this._intro?.clicks || [];
+    this._clickIdx = 0;
+    while (this._clickIdx < ic.length && ic[this._clickIdx].t < (this.playing ? this._horizon : this.pausedAt) - 1e-6) this._clickIdx++;
   }
 
   _computeIntro() {

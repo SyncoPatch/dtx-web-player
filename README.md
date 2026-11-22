@@ -145,9 +145,11 @@ repeat), or click the value and type any number in range.
   the intro is shorter than the count-in, or you start at or after that bar
   (Play, Restart, each pass of a practice loop), silent bars are added
   before the start point instead; the notes scroll in and earlier ones are
-  dimmed. Seeking while playing and speed changes don't count in. Each song
-  keeps its own setting (shared by its charts); **Count-in volume** is
-  global.
+  dimmed. **Count in on** picks when: **Start** (from the top, and Restart),
+  **After pause** (Play from anywhere else), **Loop passes**. Seeking while
+  playing and speed changes don't count in; a change made while playing
+  applies from the next Play. Each song keeps its own setting (shared by its
+  charts); **Count-in volume** is global.
 - **Play speed** (0.25x–2x, 0.05 steps) — actual playback tempo with **pitch-preserving
   time stretch**: the chart and audio slow down together while the on-screen
   scroll velocity stays the same, so notes spread out instead of crawling.
