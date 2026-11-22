@@ -2,8 +2,16 @@
 
 import { extractZip } from './zip.js';
 import { createZip } from './zipwrite.js';
-import { parseDTX, parseSetDef, decodeText } from './dtx.js';
-import { listSongs, addSong, updateSong, deleteSong, getSongFiles, listFileMeta, listSkins, addSkin, deleteSkin } from './db.js';
+import { parseDTX, decodeText } from './dtx.js';
+import {
+  listSongs, addSong, patchSong, getSong, deleteSong, getSongFiles, listFileMeta,
+  listSkins, addSkin, deleteSkin, getBoxes, updateBoxes,
+} from './db.js';
+import {
+  normPath, dirname, basename, makeResolver, scanTree,
+  searchTerms, matchTerms, songHaystack, boxPathOf, descendantIds, passesFilters, SORTS,
+  writeBoxDef, encodeShiftJIS,
+} from './library.js';
 import { Player, NOTE_TYPES, LANE_IDS, GROUP_RULES, defaultColors, defaultDisplay } from './player.js';
 import { Skin, collectSkinFiles } from './skin.js';
 import { isGuitarProFile, convertGuitarPro } from './gp.js'; // alphaTab itself loads lazily
@@ -65,6 +73,7 @@ const settings = {
   skinId: null,
   gpFeet: { kickSplit: true, hhClose: true }, // last choice in the GP import dialog
   keepVideos: false, // store BGA videos found in imports (they aren't played)
+  libSort: 'title',  // library order: title | artist | level | bpm | added
 };
 try {
   const saved = JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{}');
@@ -172,58 +181,6 @@ function fmtSize(bytes) {
   return Math.round(bytes / 1024) + ' KB';
 }
 
-// Normalize an archive path: backslashes to slashes, resolve ./ and ../,
-// lowercase (DTX files come from case-insensitive filesystems).
-function normPath(p) {
-  const parts = [];
-  for (const seg of p.replace(/\\/g, '/').split('/')) {
-    if (!seg || seg === '.') continue;
-    if (seg === '..') parts.pop();
-    else parts.push(seg);
-  }
-  return parts.join('/').toLowerCase();
-}
-
-function dirname(p) {
-  const i = p.lastIndexOf('/');
-  return i < 0 ? '' : p.slice(0, i);
-}
-
-function basename(p) {
-  return p.slice(p.lastIndexOf('/') + 1);
-}
-
-function stripExt(p) {
-  const i = p.lastIndexOf('.');
-  return i < 0 ? p : p.slice(0, i);
-}
-
-// Resolve a WAV reference relative to the chart's directory, with fallbacks:
-// alternate audio extensions (DTXMania does this too — charts often say .wav
-// or .xa while the package ships .ogg, or vice versa), then a basename search anywhere in
-// the archive.
-const AUDIO_EXTS = ['.ogg', '.wav', '.mp3', '.m4a', '.flac', '.aac', '.opus', '.webm', '.xa'];
-
-function makeResolver(fileMap, baseDir) {
-  return (ref) => {
-    const rel = normPath(ref);
-    const p = baseDir ? normPath(baseDir + '/' + rel) : rel;
-    for (const cand of [p, rel]) {
-      if (fileMap.has(cand)) return fileMap.get(cand);
-      const stem = stripExt(cand);
-      for (const ext of AUDIO_EXTS) {
-        if (fileMap.has(stem + ext)) return fileMap.get(stem + ext);
-      }
-    }
-    const wantBase = stripExt(basename(p));
-    for (const [k, v] of fileMap) {
-      const kb = basename(k);
-      if (stripExt(kb) === wantBase && AUDIO_EXTS.includes(kb.slice(stripExt(kb).length))) return v;
-    }
-    return null;
-  };
-}
-
 // ---- import ----
 
 // entries: [{ path (original, /-separated), data: Blob }]
@@ -264,64 +221,98 @@ async function storeSong(song, files) {
   navigator.storage?.persist?.().catch(() => {});
 }
 
-async function importEntries(fallbackTitle, entries) {
-  const files = [];
-  for (const e of entries) {
-    const path = e.path.replace(/\\/g, '/');
-    if (path.includes('__MACOSX/') || basename(path).startsWith('._')) continue;
-    files.push({ path: normPath(path), origPath: path, blob: e.blob });
-  }
+const readText = async (blob) => decodeText(await blob.arrayBuffer());
 
-  const dtxFiles = files.filter((f) => f.path.endsWith('.dtx'));
-  if (!dtxFiles.length) throw new Error('No .dtx files found in the import.');
+// Import a folder tree (ZIP, URL or folder) into the box that is open:
+// DTXMania folder rules (library.js scanTree) give boxes and songs. Each
+// song is stored in its own transaction, so a failure loses only that song.
+// Boxes that already exist (same parent and folder name) are reused, and a
+// song already in the library (same box, folder and charts) is skipped, so
+// re-importing an updated library adds only what's new.
+// Returns { imported, duplicates, failed: [{ title, error }], boxes, stopped }.
+async function importTree(fallbackTitle, entries) {
+  showOverlay('Reading charts…');
+  const { boxes, songs } = await scanTree(entries, readText);
+  if (!songs.length) throw new Error('No .dtx files found in the import.');
 
-  // Read chart headers for titles/levels.
-  const dtxs = [];
-  for (const f of dtxFiles) {
-    let h = { title: '', artist: '', level: null, bpm: null };
-    try {
-      h = parseDTX(decodeText(await f.blob.arrayBuffer()), { headersOnly: true });
-    } catch { /* keep placeholder */ }
-    dtxs.push({
-      path: f.path,
-      title: h.title || basename(f.origPath),
-      label: '',
-      level: h.level,
-      bpm: h.bpm,
-      artist: h.artist,
+  const base = libraryBox();
+  const keyToId = new Map();
+  let newBoxes = 0;
+  if (boxes.length) {
+    await updateBoxes((list) => {
+      keyToId.clear();
+      newBoxes = 0;
+      for (const b of boxes) {
+        const parent = b.parentKey == null ? base : keyToId.get(b.parentKey) ?? base;
+        const folder = b.folder.toLowerCase();
+        const existing = list.find((x) => (x.parent ?? null) === parent && (x.folder || '').toLowerCase() === folder);
+        if (existing) { keyToId.set(b.key, existing.id); continue; }
+        const id = newId();
+        keyToId.set(b.key, id);
+        list.push({
+          id, parent, title: b.title, genre: b.genre, color: b.color, comment: b.comment,
+          artist: b.artist, folder: b.folder, def: b.def, addedAt: Date.now(),
+        });
+        newBoxes++;
+      }
     });
   }
 
-  // SET.def, when present, provides the song title and difficulty labels.
-  let songTitle = null;
-  const setDef = files.find((f) => basename(f.path) === 'set.def');
-  if (setDef) {
+  const songKey = (box, folder, paths) => `${box ?? ''}\n${(folder || '').toLowerCase()}\n${[...paths].sort().join('\n')}`;
+  const have = new Set((await listSongs()).map((s) => songKey(s.box ?? null, s.folder, s.dtxs.map((d) => d.path))));
+
+  const res = { imported: 0, duplicates: 0, failed: [], boxes: newBoxes, stopped: false };
+  for (let i = 0; i < songs.length; i++) {
+    const sc = songs[i];
+    const box = sc.boxKey == null ? base : keyToId.get(sc.boxKey) ?? base;
+    const title = sc.title || fallbackTitle;
+    const key = songKey(box, sc.folder, sc.dtxs.map((d) => d.path));
+    if (have.has(key)) { res.duplicates++; continue; }
+    el.overlayText.textContent = songs.length > 1 ? `Importing ${i + 1} / ${songs.length} — ${title}` : `Importing ${title}…`;
+    const song = {
+      id: newId(),
+      title,
+      artist: sc.artist,
+      genre: sc.genre,
+      dtxs: sc.dtxs,
+      addedAt: Date.now(),
+      size: sc.files.reduce((a, f) => a + f.blob.size, 0),
+      box,
+      folder: sc.folder,
+    };
     try {
-      const def = parseSetDef(decodeText(await setDef.blob.arrayBuffer()));
-      songTitle = def.title;
-      const dir = dirname(setDef.path);
-      for (const c of def.charts) {
-        const target = dir ? normPath(dir + '/' + c.file) : normPath(c.file);
-        const match = dtxs.find((d) => d.path === target || basename(d.path) === normPath(c.file));
-        if (match) match.label = c.label;
-      }
-    } catch { /* SET.def is optional */ }
+      await storeSong(song, sc.files);
+      have.add(key);
+      res.imported++;
+    } catch (err) {
+      console.error(err);
+      res.failed.push({ title, error: err.message });
+      if (/storage space/i.test(err.message)) { res.stopped = true; break; } // the rest won't fit either
+    }
   }
+  return res;
+}
 
-  dtxs.sort((a, b) => (a.level ?? 999) - (b.level ?? 999));
-  const artist = dtxs.find((d) => d.artist)?.artist || '';
-  for (const d of dtxs) delete d.artist;
+// "Imported 37 songs, 2 boxes · 3 already in the library · …" for a
+// multi-song import, or '' for a plain single-song import that worked.
+function importSummary(r) {
+  const n = (k, w) => `${k} ${w}${k === 1 ? '' : 's'}`;
+  if (r.imported <= 1 && !r.duplicates && !r.failed.length && !r.boxes) return '';
+  const boxes = r.boxes ? ` and ${r.boxes} new box${r.boxes === 1 ? '' : 'es'}` : '';
+  const bits = [`Imported ${n(r.imported, 'song')}${boxes}.`];
+  if (r.duplicates) bits.push(`${n(r.duplicates, 'song')} already in the library ${r.duplicates === 1 ? 'was' : 'were'} skipped.`);
+  if (r.failed.length) {
+    bits.push(`${n(r.failed.length, 'song')} failed:`);
+    for (const f of r.failed.slice(0, 8)) bits.push(`  • ${f.title}: ${f.error}`);
+    if (r.failed.length > 8) bits.push(`  • … and ${r.failed.length - 8} more`);
+  }
+  if (r.stopped) bits.push('The import stopped because storage is full.');
+  return bits.join('\n');
+}
 
-  const song = {
-    id: newId(),
-    title: songTitle || dtxs[0].title || fallbackTitle,
-    artist,
-    dtxs,
-    addedAt: Date.now(),
-    size: files.reduce((a, f) => a + f.blob.size, 0),
-  };
-  await storeSong(song, files);
-  return song;
+function importNotes(...notes) {
+  const text = notes.filter(Boolean).join('\n\n');
+  if (text) alert(text);
 }
 
 // Guitar Pro: each drum track becomes a generated .dtx chart played with a
@@ -409,6 +400,7 @@ async function importGuitarPro(file, feetOpts = {}) {
     size: files.reduce((a, f) => a + f.blob.size, 0),
     source: 'guitarpro',
     sync,
+    box: libraryBox(),
   };
   await storeSong(song, files);
   return warnings;
@@ -439,6 +431,7 @@ async function importZipFiles(fileList) {
   const gpNames = fileList.filter((f) => isGuitarProFile(f.name)).map((f) => f.name);
   const gpOpts = gpNames.length ? await askGpImportOptions(gpNames) : null;
   const skipped = [];
+  const summaries = [];
   for (const file of fileList) {
     if (isGuitarProFile(file.name)) {
       if (!gpOpts) continue; // dialog cancelled
@@ -454,12 +447,12 @@ async function importZipFiles(fileList) {
     try {
       showOverlay(`Extracting ${file.name}…`);
       const entries = await extractZip(file, { skip: skipVideo() });
-      showOverlay(`Importing ${file.name}…`);
-      await importEntries(
+      const r = await importTree(
         file.name.replace(/\.zip$/i, ''),
         entries.map((e) => ({ path: e.name, blob: e.blob })),
       );
       skipped.push(...entries.skipped);
+      summaries.push(fileList.length > 1 && importSummary(r) ? `${file.name}: ${importSummary(r)}` : importSummary(r));
     } catch (err) {
       console.error(err);
       alert(`Failed to import ${file.name}:\n${err.message}`);
@@ -467,8 +460,7 @@ async function importZipFiles(fileList) {
   }
   hideOverlay();
   await renderSongList();
-  const note = skippedVideosNote(skipped);
-  if (note) alert(note);
+  importNotes(...summaries, skippedVideosNote(skipped));
 }
 
 async function importFromUrl() {
@@ -502,14 +494,13 @@ async function importFromUrl() {
     );
     showOverlay(`Extracting ${name}…`);
     const entries = await extractZip(zip, { skip: skipVideo() });
-    showOverlay(`Importing ${name}…`);
-    await importEntries(
+    const r = await importTree(
       name.replace(/\.zip$/i, ''),
       entries.map((e) => ({ path: e.name, blob: e.blob })),
     );
     hideOverlay();
-    const note = skippedVideosNote(entries.skipped);
-    if (note) alert(note);
+    await renderSongList();
+    importNotes(importSummary(r), skippedVideosNote(entries.skipped));
   } catch (err) {
     console.error(err);
     const corsHint = err instanceof TypeError
@@ -537,11 +528,10 @@ async function importFolder(fileList) {
       if (skip?.(path)) skipped.push({ name: path, size: f.size });
       else kept.push({ path, blob: f });
     }
-    await importEntries(root, kept);
+    const r = await importTree(root, kept);
     hideOverlay();
     await renderSongList();
-    const note = skippedVideosNote(skipped);
-    if (note) alert(note);
+    importNotes(importSummary(r), skippedVideosNote(skipped));
     return;
   } catch (err) {
     console.error(err);
@@ -551,79 +541,340 @@ async function importFolder(fileList) {
   await renderSongList();
 }
 
-// ---- song list ----
+// ---- library: boxes, search, song list ----
+
+const LIB_BOX_KEY = 'dtx-library-box';
+const LIB_PAGE = 200;
+let libSongs = [];       // every song record, as last read
+let libBoxes = [];       // the box tree
+let libHay = new Map();  // song id -> normalised search text
+let curBox = null;       // id of the open box, null = top level
+try { curBox = localStorage.getItem(LIB_BOX_KEY) || null; } catch { /* storage blocked */ }
+let libShown = LIB_PAGE; // result cards shown while searching
+let libGen = 0;          // only the newest render paints
+
+// The open box, if it still exists.
+function libraryBox() {
+  return curBox && libBoxes.some((b) => b.id === curBox) ? curBox : null;
+}
+
+function enterBox(id) {
+  curBox = id || null;
+  try {
+    if (curBox) localStorage.setItem(LIB_BOX_KEY, curBox);
+    else localStorage.removeItem(LIB_BOX_KEY);
+  } catch { /* storage blocked */ }
+  libShown = LIB_PAGE;
+  paintLibrary();
+  el.songList.scrollTop = 0;
+}
+
+const songBox = (song) => (song.box && libBoxes.some((b) => b.id === song.box) ? song.box : null);
+const boxTitle = (b) => b.title || b.folder || 'Untitled box';
+const boxPathText = (id) => ['Library', ...boxPathOf(libBoxes, id).map(boxTitle)].join(' › ');
 
 async function renderSongList() {
-  const songs = await listSongs();
-  const needArtist = [];
-  el.songList.replaceChildren();
-  el.emptyHint.hidden = songs.length > 0;
+  const gen = ++libGen;
+  let songs, boxes;
+  try {
+    [songs, boxes] = await Promise.all([listSongs(), getBoxes()]);
+  } catch (err) {
+    console.error(err);
+    alert(`Couldn’t read the library:\n${err.message}`);
+    return;
+  }
+  if (gen !== libGen) return;
+  libSongs = songs;
+  libBoxes = boxes;
+  const paths = new Map();
+  libHay = new Map(songs.map((s) => {
+    const b = songBox(s);
+    if (!paths.has(b)) paths.set(b, boxPathOf(boxes, b));
+    return [s.id, songHaystack(s, paths.get(b))];
+  }));
+  paintLibrary();
+  backfillArtists(songs.filter((s) => s.artist === undefined));
+}
 
-  for (const song of songs) {
+function libFilters() {
+  const num = (id) => {
+    const v = $(id).value.trim();
+    return v === '' || !Number.isFinite(Number(v)) ? null : Number(v);
+  };
+  return {
+    levelMin: num('flt-lvl-min'), levelMax: num('flt-lvl-max'),
+    bpmMin: num('flt-bpm-min'), bpmMax: num('flt-bpm-max'),
+    kind: $('flt-kind').value,
+  };
+}
+
+const filtersActive = (f) => f.levelMin != null || f.levelMax != null || f.bpmMin != null || f.bpmMax != null || !!f.kind;
+
+function paintLibrary() {
+  const box = libraryBox();
+  if (curBox && !box) curBox = null;
+  const terms = searchTerms($('lib-search').value);
+  const filters = libFilters();
+  const searching = terms.length > 0 || filtersActive(filters);
+  $('btn-clear-filters').hidden = !filtersActive(filters);
+  paintCrumbs(box, searching);
+  const sort = SORTS[settings.libSort] || SORTS.title;
+  el.emptyHint.hidden = libSongs.length > 0 || libBoxes.length > 0;
+
+  const items = [];
+  if (searching) {
+    const scope = $('lib-scope').value === 'box' && box ? descendantIds(libBoxes, box) : null;
+    const hits = libSongs.filter((s) => (!scope || scope.has(songBox(s)))
+      && (!terms.length || matchTerms(libHay.get(s.id) || '', terms))
+      && passesFilters(s, filters)).sort(sort);
+    for (const s of hits.slice(0, libShown)) items.push(safeCard(() => songCard(s, { pathChip: true }), s));
+    if (!hits.length) items.push(libNote('lib-empty', 'No songs match.'));
+    if (hits.length > libShown) {
+      const more = document.createElement('li');
+      more.className = 'lib-more';
+      const btn = document.createElement('button');
+      btn.className = 'btn';
+      btn.textContent = `Show more (${hits.length - libShown} left)`;
+      btn.onclick = () => { libShown += LIB_PAGE; paintLibrary(); };
+      more.append(btn);
+      items.push(more);
+    }
+  } else {
+    const counts = boxSongCounts();
+    const kids = libBoxes.filter((b) => (b.parent ?? null) === box)
+      .sort((a, b) => SORTS.title({ title: boxTitle(a) }, { title: boxTitle(b) }));
+    for (const b of kids) items.push(safeCard(() => boxCard(b, counts), null));
+    const songs = libSongs.filter((s) => songBox(s) === box).sort(sort);
+    for (const s of songs) items.push(safeCard(() => songCard(s), s));
+    if (!items.length && (libSongs.length || libBoxes.length)) {
+      items.push(libNote('lib-empty', box ? 'This box is empty. Import songs while it is open, or move songs here from their ⋯ menu.' : 'Nothing here.'));
+    }
+  }
+  el.songList.replaceChildren(...items);
+}
+
+function libNote(cls, text) {
+  const li = document.createElement('li');
+  li.className = cls;
+  li.textContent = text;
+  return li;
+}
+
+// A card that fails to build becomes a "damaged" card with Delete, so one
+// bad record can't hide the rest of the list.
+function safeCard(build, song) {
+  try {
+    return build();
+  } catch (err) {
+    console.error('card failed', song?.id, err);
     const li = document.createElement('li');
-    li.className = 'song-card';
-
+    li.className = 'song-card damaged';
     const head = document.createElement('div');
     head.className = 'song-head';
     const title = document.createElement('span');
     title.className = 'song-title';
-    title.textContent = song.title;
-    title.title = song.title;
-    const menuBtn = document.createElement('button');
-    menuBtn.className = 'btn small card-menu-btn';
-    menuBtn.textContent = '⋯';
-    menuBtn.title = 'More actions';
-    menuBtn.onclick = () => showCardMenu(menuBtn, song);
-    const del = document.createElement('button');
-    del.className = 'btn small danger';
-    del.textContent = 'Delete';
-    del.onclick = async () => {
-      if (!confirm(`Delete "${song.title}" from this browser?`)) return;
-      await deleteSong(song.id);
-      let pruned = false;
-      for (const key of Object.keys(chartOffsets)) {
-        if (key.startsWith(song.id + '::')) { delete chartOffsets[key]; pruned = true; }
-      }
-      if (pruned) localStorage.setItem(CHART_OFFSETS_KEY, JSON.stringify(chartOffsets));
-      renderSongList();
-    };
-    head.append(title, menuBtn, del);
-
-    const info = document.createElement('div');
-    info.className = 'song-info';
-    info.textContent = songInfoText(song);
-    info.title = info.textContent;
-    info.hidden = !info.textContent;
-    if (song.artist === undefined) needArtist.push([song, info]);
-
+    title.textContent = `${song?.title || 'Unknown item'} (damaged)`;
+    head.append(title);
+    if (song?.id) {
+      const del = document.createElement('button');
+      del.className = 'btn small danger';
+      del.textContent = 'Delete';
+      del.onclick = () => removeSong(song);
+      head.append(del);
+    }
     const meta = document.createElement('div');
     meta.className = 'song-meta';
-    const kind = song.source === 'guitarpro' ? (song.sync?.audio ? 'Guitar Pro + recording · ' : 'Guitar Pro · ') : '';
-    meta.textContent = `${kind}${song.dtxs.length} chart${song.dtxs.length > 1 ? 's' : ''} · ${fmtSize(song.size)} · added ${new Date(song.addedAt).toLocaleDateString()}`;
-
-    const charts = document.createElement('div');
-    charts.className = 'charts';
-    for (const d of song.dtxs) {
-      const btn = document.createElement('button');
-      btn.className = 'chart-btn';
-      const name = document.createElement('span');
-      name.textContent = d.label || d.title || basename(d.path);
-      btn.append(name);
-      const lvl = fmtLevel(d.level);
-      if (lvl) {
-        const badge = document.createElement('span');
-        badge.className = 'lvl';
-        badge.textContent = lvl;
-        btn.append(badge);
-      }
-      btn.onclick = () => openChart(song, d);
-      charts.append(btn);
-    }
-
-    li.append(head, info, meta, charts);
-    el.songList.append(li);
+    meta.textContent = 'This entry couldn’t be shown.';
+    li.append(head, meta);
+    return li;
   }
-  backfillArtists(needArtist);
+}
+
+function paintCrumbs(box, searching) {
+  const nav = $('lib-crumbs');
+  const parts = [];
+  const trail = [{ id: null, title: 'Library' }, ...boxPathOf(libBoxes, box).map((b) => ({ id: b.id, title: boxTitle(b) }))];
+  trail.forEach((c, i) => {
+    if (i) {
+      const sep = document.createElement('span');
+      sep.className = 'crumb-sep';
+      sep.textContent = '›';
+      parts.push(sep);
+    }
+    if (i === trail.length - 1 && !searching) {
+      const here = document.createElement('span');
+      here.className = 'crumb-here';
+      here.textContent = c.title;
+      parts.push(here);
+    } else {
+      const b = document.createElement('button');
+      b.textContent = c.title;
+      b.onclick = () => { clearSearch(); enterBox(c.id); };
+      parts.push(b);
+    }
+  });
+  if (searching) {
+    const sep = document.createElement('span');
+    sep.className = 'crumb-sep';
+    sep.textContent = '›';
+    const here = document.createElement('span');
+    here.className = 'crumb-here';
+    here.textContent = 'Search';
+    parts.push(sep, here);
+  }
+  nav.replaceChildren(...parts);
+}
+
+// Songs in each box including its sub-boxes.
+function boxSongCounts() {
+  const direct = new Map();
+  for (const s of libSongs) {
+    const b = songBox(s);
+    direct.set(b, (direct.get(b) || 0) + 1);
+  }
+  const total = new Map();
+  const kids = new Map();
+  for (const b of libBoxes) {
+    const p = b.parent ?? null;
+    if (!kids.has(p)) kids.set(p, []);
+    kids.get(p).push(b.id);
+  }
+  const visit = (id, seen) => {
+    if (total.has(id)) return total.get(id);
+    if (seen.has(id)) return 0;
+    seen.add(id);
+    let n = direct.get(id) || 0;
+    for (const k of kids.get(id) || []) n += visit(k, seen);
+    total.set(id, n);
+    return n;
+  };
+  for (const b of libBoxes) visit(b.id, new Set());
+  return { total, kids };
+}
+
+function boxCard(b, counts) {
+  const li = document.createElement('li');
+  li.className = 'box-card';
+  if (b.color) li.style.setProperty('--box-color', b.color);
+  li.tabIndex = 0;
+  li.setAttribute('role', 'button');
+  const head = document.createElement('div');
+  head.className = 'song-head';
+  const title = document.createElement('span');
+  title.className = 'song-title';
+  title.textContent = boxTitle(b);
+  title.title = boxTitle(b);
+  const menuBtn = document.createElement('button');
+  menuBtn.className = 'btn small card-menu-btn';
+  menuBtn.textContent = '⋯';
+  menuBtn.title = 'More actions';
+  menuBtn.onclick = (e) => { e.stopPropagation(); showBoxMenu(menuBtn, b); };
+  head.append(title, menuBtn);
+  const meta = document.createElement('div');
+  meta.className = 'song-meta';
+  const n = counts.total.get(b.id) || 0;
+  const sub = (counts.kids.get(b.id) || []).length;
+  meta.textContent = [b.genre, `${n} song${n === 1 ? '' : 's'}`, sub ? `${sub} box${sub === 1 ? '' : 'es'}` : '']
+    .filter(Boolean).join(' · ');
+  li.append(head, meta);
+  if (b.comment) {
+    const c = document.createElement('div');
+    c.className = 'song-meta';
+    c.textContent = b.comment;
+    li.append(c);
+  }
+  li.onclick = () => enterBox(b.id);
+  li.onkeydown = (e) => { if (e.key === 'Enter' && e.target === li) enterBox(b.id); };
+  return li;
+}
+
+async function removeSong(song) {
+  if (!confirm(`Delete "${song.title}" from this browser?`)) return;
+  await deleteSong(song.id);
+  let pruned = false;
+  for (const key of Object.keys(chartOffsets)) {
+    if (key.startsWith(song.id + '::')) { delete chartOffsets[key]; pruned = true; }
+  }
+  if (pruned) localStorage.setItem(CHART_OFFSETS_KEY, JSON.stringify(chartOffsets));
+  renderSongList();
+}
+
+function songCard(song, { pathChip = false } = {}) {
+  const li = document.createElement('li');
+  li.className = 'song-card';
+
+  const head = document.createElement('div');
+  head.className = 'song-head';
+  const title = document.createElement('span');
+  title.className = 'song-title';
+  title.textContent = song.title;
+  title.title = song.title;
+  const menuBtn = document.createElement('button');
+  menuBtn.className = 'btn small card-menu-btn';
+  menuBtn.textContent = '⋯';
+  menuBtn.title = 'More actions';
+  menuBtn.onclick = () => showCardMenu(menuBtn, song);
+  const del = document.createElement('button');
+  del.className = 'btn small danger';
+  del.textContent = 'Delete';
+  del.onclick = () => removeSong(song);
+  head.append(title, menuBtn, del);
+  li.append(head);
+
+  if (pathChip) {
+    const chip = document.createElement('button');
+    chip.className = 'path-chip';
+    chip.textContent = boxPathText(songBox(song));
+    chip.title = 'Open this box';
+    chip.onclick = () => { clearSearch(); enterBox(songBox(song)); };
+    li.append(chip);
+  }
+
+  const info = document.createElement('div');
+  info.className = 'song-info';
+  info.textContent = songInfoText(song);
+  info.title = info.textContent;
+  info.hidden = !info.textContent;
+  info.dataset.songId = song.id;
+
+  const meta = document.createElement('div');
+  meta.className = 'song-meta';
+  const kind = song.source === 'guitarpro' ? (song.sync?.audio ? 'Guitar Pro + recording · ' : 'Guitar Pro · ') : '';
+  meta.textContent = `${kind}${song.dtxs.length} chart${song.dtxs.length > 1 ? 's' : ''} · ${fmtSize(song.size)} · added ${new Date(song.addedAt).toLocaleDateString()}`;
+
+  const charts = document.createElement('div');
+  charts.className = 'charts';
+  for (const d of song.dtxs) {
+    const btn = document.createElement('button');
+    btn.className = 'chart-btn';
+    const name = document.createElement('span');
+    name.textContent = d.label || d.title || basename(d.path);
+    btn.append(name);
+    const lvl = fmtLevel(d.level);
+    if (lvl) {
+      const badge = document.createElement('span');
+      badge.className = 'lvl';
+      badge.textContent = lvl;
+      btn.append(badge);
+    }
+    btn.onclick = () => openChartFromLibrary(song, d);
+    charts.append(btn);
+  }
+
+  li.append(info, meta, charts);
+  return li;
+}
+
+// Open from a card with the record as stored now, not the card's copy (it
+// may predate an attach, alignment or other change).
+async function openChartFromLibrary(song, chartInfo) {
+  const fresh = await getSong(song.id).catch(() => null);
+  if (!fresh) {
+    alert('This song is no longer in the library.');
+    renderSongList();
+    return;
+  }
+  openChart(fresh, fresh.dtxs.find((d) => d.path === chartInfo.path) || chartInfo);
 }
 
 const fmtBpm = (b) => String(Math.round(b * 100) / 100);
@@ -641,24 +892,257 @@ function songInfoText(song) {
 }
 
 // Songs imported before artists were stored: read it from the first chart's
-// header once, save it, and fill the card in place.
+// header once and save only that field (patchSong edits the stored record,
+// so a slow pass can't overwrite newer changes or bring back a deleted song).
+const backfilling = new Set();
 async function backfillArtists(list) {
-  for (const [song, info] of list) {
+  for (const song of list) {
+    if (backfilling.has(song.id)) continue;
+    backfilling.add(song.id);
     try {
       const files = await getSongFiles(song.id);
       const blob = files.find((f) => f.path === song.dtxs[0]?.path)?.blob;
       let artist = '';
-      if (blob) artist = parseDTX(decodeText(await blob.arrayBuffer()), { headersOnly: true }).artist || '';
-      song.artist = artist;
-      await updateSong(song);
-      info.textContent = songInfoText(song);
-      info.title = info.textContent;
-      info.hidden = !info.textContent;
+      if (blob) artist = parseDTX(await readText(blob), { headersOnly: true }).artist || '';
+      const saved = await patchSong(song.id, (s) => {
+        if (s.artist !== undefined) return false;
+        s.artist = artist;
+      });
+      const now = saved?.artist ?? artist;
+      const cached = libSongs.find((s) => s.id === song.id);
+      if (cached) cached.artist = now;
+      for (const info of el.songList.querySelectorAll('.song-info')) {
+        if (info.dataset.songId !== song.id) continue;
+        info.textContent = songInfoText({ ...song, artist: now });
+        info.title = info.textContent;
+        info.hidden = !info.textContent;
+      }
     } catch (err) {
       console.warn('artist backfill failed', song.id, err);
     }
+    backfilling.delete(song.id);
   }
 }
+
+// ---- search & filters ----
+
+function clearSearch() {
+  $('lib-search').value = '';
+  libShown = LIB_PAGE;
+}
+
+let searchTimer = null;
+$('lib-search').addEventListener('input', () => {
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(() => { libShown = LIB_PAGE; paintLibrary(); }, 120);
+});
+$('lib-search').addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') {
+    e.stopPropagation();
+    if ($('lib-search').value) { clearSearch(); paintLibrary(); } else $('lib-search').blur();
+  }
+});
+for (const id of ['lib-scope', 'flt-kind', 'flt-lvl-min', 'flt-lvl-max', 'flt-bpm-min', 'flt-bpm-max']) {
+  $(id).addEventListener('input', () => { libShown = LIB_PAGE; paintLibrary(); });
+}
+$('lib-sort').value = SORTS[settings.libSort] ? settings.libSort : 'title';
+$('lib-sort').addEventListener('change', () => {
+  settings.libSort = $('lib-sort').value;
+  saveSettings();
+  paintLibrary();
+});
+$('btn-clear-filters').onclick = () => {
+  for (const id of ['flt-lvl-min', 'flt-lvl-max', 'flt-bpm-min', 'flt-bpm-max']) $(id).value = '';
+  $('flt-kind').value = '';
+  paintLibrary();
+};
+
+// ---- boxes: create, edit, move, delete ----
+
+function askBox(heading, init = {}) {
+  const dlg = $('box-dialog');
+  $('box-dialog-title').textContent = heading;
+  $('box-title').value = init.title || '';
+  $('box-genre').value = init.genre || '';
+  const hex = /^#[0-9a-f]{6}$/i.test(init.color || '') ? init.color : '#ffffff';
+  $('box-color').value = hex;
+  $('box-color-on').checked = !!init.color;
+  $('box-color').oninput = () => { $('box-color-on').checked = true; };
+  return new Promise((resolve) => {
+    dlg.onclose = () => {
+      if (dlg.returnValue !== 'ok') { resolve(null); return; }
+      resolve({
+        title: $('box-title').value.trim(),
+        genre: $('box-genre').value.trim(),
+        // Keep a named colour (box.def allows "White") unless it was changed.
+        color: $('box-color-on').checked
+          ? ($('box-color').value.toLowerCase() === hex.toLowerCase() && init.color ? init.color : $('box-color').value)
+          : '',
+      });
+    };
+    dlg.returnValue = '';
+    dlg.showModal();
+  });
+}
+
+$('btn-new-box').onclick = async () => {
+  const v = await askBox('New box');
+  if (!v?.title) return;
+  const parent = libraryBox();
+  await updateBoxes((list) => {
+    list.push({ id: newId(), parent, title: v.title, genre: v.genre, color: v.color, comment: '', artist: '', folder: '', def: '', addedAt: Date.now() });
+  });
+  await renderSongList();
+};
+
+async function editBox(b) {
+  const v = await askBox('Edit box', b);
+  if (!v?.title) return;
+  await updateBoxes((list) => {
+    const x = list.find((y) => y.id === b.id);
+    if (!x) return false;
+    Object.assign(x, v);
+  });
+  await renderSongList();
+}
+
+// Pick a destination box. disabled: box ids that can't be chosen.
+function pickBox(heading, disabled = new Set(), here = null) {
+  const dlg = $('move-dialog');
+  $('move-dialog-title').textContent = heading;
+  const ul = $('move-tree');
+  const kids = new Map();
+  for (const b of libBoxes) {
+    const p = b.parent && libBoxes.some((x) => x.id === b.parent) ? b.parent : null;
+    if (!kids.has(p)) kids.set(p, []);
+    kids.get(p).push(b);
+  }
+  const rows = [];
+  return new Promise((resolve) => {
+    const add = (id, label, depth) => {
+      const li = document.createElement('li');
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.textContent = label;
+      btn.style.paddingLeft = `${8 + depth * 18}px`;
+      btn.disabled = disabled.has(id);
+      if (id === here) { btn.classList.add('here'); btn.textContent += ' (current)'; btn.disabled = true; }
+      btn.onclick = () => { resolve({ id }); dlg.onclose = null; dlg.close(); };
+      li.append(btn);
+      rows.push(li);
+    };
+    const walk = (p, depth, seen) => {
+      for (const b of (kids.get(p) || []).sort((x, y) => SORTS.title({ title: boxTitle(x) }, { title: boxTitle(y) }))) {
+        if (seen.has(b.id)) continue;
+        seen.add(b.id);
+        add(b.id, `▸ ${boxTitle(b)}`, depth);
+        walk(b.id, depth + 1, seen);
+      }
+    };
+    add(null, 'Library (top level)', 0);
+    walk(null, 1, new Set());
+    ul.replaceChildren(...rows);
+    dlg.onclose = () => resolve(null);
+    dlg.showModal();
+  });
+}
+
+async function moveSong(song) {
+  const dest = await pickBox(`Move “${song.title}” to…`, new Set(), songBox(song));
+  if (!dest) return;
+  await patchSong(song.id, (s) => { s.box = dest.id; });
+  await renderSongList();
+}
+
+async function moveBox(b) {
+  const banned = descendantIds(libBoxes, b.id);
+  const dest = await pickBox(`Move box “${boxTitle(b)}” to…`, banned, b.parent ?? null);
+  if (!dest) return;
+  await updateBoxes((list) => {
+    const x = list.find((y) => y.id === b.id);
+    if (!x || descendantIds(list, b.id).has(dest.id)) return false; // never into itself
+    x.parent = dest.id;
+  });
+  await renderSongList();
+}
+
+// Delete a box. withContents: also delete every song and box inside it;
+// otherwise they move up to the box's parent.
+async function deleteBox(b, withContents) {
+  const ids = descendantIds(libBoxes, b.id);
+  const inside = libSongs.filter((s) => ids.has(songBox(s)));
+  const direct = libSongs.filter((s) => songBox(s) === b.id);
+  const parent = b.parent && libBoxes.some((x) => x.id === b.parent) ? b.parent : null;
+  const where = parent ? `“${boxTitle(libBoxes.find((x) => x.id === parent))}”` : 'the top level';
+  const msg = withContents
+    ? `Delete the box “${boxTitle(b)}” and everything in it: ${inside.length} song${inside.length === 1 ? '' : 's'}`
+      + ` and ${ids.size - 1} box${ids.size - 1 === 1 ? '' : 'es'}? This can’t be undone.`
+    : `Delete the box “${boxTitle(b)}”? Its songs and boxes move to ${where}.`;
+  if (!confirm(msg)) return;
+  try {
+    showOverlay('Deleting…');
+    if (withContents) {
+      for (let i = 0; i < inside.length; i++) {
+        el.overlayText.textContent = `Deleting ${i + 1} / ${inside.length}…`;
+        await deleteSong(inside[i].id);
+      }
+      await updateBoxes((list) => {
+        const all = descendantIds(list, b.id);
+        for (let i = list.length - 1; i >= 0; i--) if (all.has(list[i].id)) list.splice(i, 1);
+      });
+    } else {
+      for (const s of direct) await patchSong(s.id, (x) => { x.box = parent; });
+      await updateBoxes((list) => {
+        const i = list.findIndex((x) => x.id === b.id);
+        if (i < 0) return false;
+        list.splice(i, 1);
+        for (const x of list) if (x.parent === b.id) x.parent = parent;
+      });
+    }
+  } catch (err) {
+    console.error(err);
+    alert(`Failed to delete the box:\n${err.message}`);
+  }
+  hideOverlay();
+  if (curBox && !libBoxes.some((x) => x.id === curBox && !ids.has(x.id))) curBox = parent;
+  if (ids.has(curBox)) enterBox(parent);
+  await renderSongList();
+}
+
+function showBoxMenu(btn, b) {
+  const reopen = openMenu?.dataset.boxId !== b.id;
+  closeCardMenu();
+  if (!reopen) return;
+  const menu = document.createElement('div');
+  menu.className = 'card-menu';
+  menu.dataset.boxId = b.id;
+  const item = (text, fn, title = '') => {
+    const it = document.createElement('button');
+    it.className = 'card-menu-item';
+    it.textContent = text;
+    if (title) it.title = title;
+    it.onclick = () => { closeCardMenu(); fn(); };
+    menu.append(it);
+  };
+  item('Edit…', () => editBox(b));
+  item('Move to…', () => moveBox(b));
+  item('Export', () => exportLibrary(b.id), 'Download this box with its songs as DTXMania folders');
+  item('Delete box (keep songs)…', () => deleteBox(b, false));
+  item('Delete box and its songs…', () => deleteBox(b, true));
+  placeMenu(menu, btn);
+}
+
+function placeMenu(menu, btn) {
+  const r = btn.getBoundingClientRect();
+  document.body.append(menu);
+  const h = menu.offsetHeight;
+  const below = r.bottom + 4 + h <= window.innerHeight;
+  menu.style.top = `${below ? r.bottom + 4 : Math.max(8, r.top - 4 - h)}px`;
+  menu.style.left = `${Math.max(8, Math.min(r.left, window.innerWidth - 250))}px`;
+  openMenu = menu;
+}
+
+$('btn-export-lib').onclick = () => exportLibrary(libraryBox());
 
 // ---- song card menu ----
 
@@ -686,7 +1170,14 @@ function showCardMenu(btn, song) {
     closeCardMenu();
     exportSongZip(song);
   };
-  menu.append(zipItem);
+  const moveItem = document.createElement('button');
+  moveItem.className = 'card-menu-item';
+  moveItem.textContent = 'Move to\u2026';
+  moveItem.onclick = () => {
+    closeCardMenu();
+    moveSong(song);
+  };
+  menu.append(moveItem, zipItem);
   for (const d of song.dtxs) {
     const name = d.label || d.title || basename(d.path);
     const view = document.createElement('button');
@@ -706,11 +1197,7 @@ function showCardMenu(btn, song) {
     };
     menu.append(item);
   }
-  const r = btn.getBoundingClientRect();
-  menu.style.top = `${r.bottom + 4}px`;
-  menu.style.left = `${Math.max(8, Math.min(r.left, window.innerWidth - 250))}px`;
-  document.body.append(menu);
-  openMenu = menu;
+  placeMenu(menu, btn);
 }
 
 const safeFileName = (s, fallback) => (s || '').replace(/[\\/:*?"<>|]+/g, '_').trim().slice(0, 120) || fallback;
@@ -745,6 +1232,143 @@ async function exportSongZip(song) {
   } catch (err) {
     console.error(err);
     alert(`Failed to export ZIP:\n${err.message}`);
+  }
+  hideOverlay();
+}
+
+// ---- library export ----
+
+// The whole library (rootId null) or one box as DTXMania folders: every box
+// becomes a folder with a box.def, every song its folder inside it. Files
+// stay Blob references, so nothing is held in memory whole.
+// Returns { top, entries: [{ name, blob }] }.
+async function buildLibraryExport(rootId) {
+  const [songs, boxes] = await Promise.all([listSongs(), getBoxes()]);
+  const byId = new Map(boxes.map((b) => [b.id, b]));
+  const parentOf = (b) => (b.parent && byId.has(b.parent) ? b.parent : null);
+  const inScope = rootId ? descendantIds(boxes, rootId) : null;
+
+  const used = new Map(); // folder path -> Set of lowercased child names
+  const uniqueChild = (dir, name) => {
+    if (!used.has(dir)) used.set(dir, new Set());
+    const set = used.get(dir);
+    let n = name, k = 2;
+    while (set.has(n.toLowerCase())) n = `${name} (${k++})`;
+    set.add(n.toLowerCase());
+    return n;
+  };
+  const boxFolderName = (b) => safeFileName(b.folder || boxTitle(b), 'Box');
+
+  const top = rootId ? boxFolderName(byId.get(rootId)) : 'DTX Library';
+  const dirs = new Map();
+  const dirOf = (id) => {
+    if (id === (rootId ?? null)) return top;
+    if (dirs.has(id)) return dirs.get(id);
+    const b = byId.get(id);
+    const parentDir = dirOf(parentOf(b));
+    const d = `${parentDir}/${uniqueChild(parentDir, boxFolderName(b))}`;
+    dirs.set(id, d);
+    return d;
+  };
+
+  const entries = [];
+  const sortedBoxes = [...boxes].sort((a, b) => SORTS.title({ title: boxTitle(a) }, { title: boxTitle(b) }));
+  for (const b of sortedBoxes) {
+    if (inScope && !inScope.has(b.id)) continue;
+    const text = writeBoxDef(b.def, { title: boxTitle(b), genre: b.genre || '', color: b.color || '', comment: b.comment || '', artist: b.artist || '' });
+    entries.push({ name: `${dirOf(b.id)}/box.def`, blob: new Blob([encodeShiftJIS(text)]) });
+  }
+
+  // Song files. Identical paths (shared sounds, a set.def with several
+  // songs) are written once; a different file at a taken path moves the
+  // song to a renamed folder.
+  const written = new Map(); // lowercased name -> size
+  for (const song of songs.sort(SORTS.title)) {
+    const box = song.box && byId.has(song.box) ? song.box : null;
+    if (inScope && !inScope.has(box)) continue;
+    const dir = dirOf(box);
+    const files = await getSongFiles(song.id);
+    if (!files.length) continue;
+    const gp = song.source === 'guitarpro';
+    let rel = files.map((f) => ((gp ? f.path : f.origPath) || f.path).replace(/^\/+/, ''));
+    // Songs imported with their folder keep it; others (older imports, Guitar
+    // Pro, single songs from a ZIP root) get one named after the title
+    // unless their files already share a top folder.
+    const tops = new Set(rel.map((r) => (r.includes('/') ? r.split('/')[0].toLowerCase() : '')));
+    const hasFolder = (typeof song.folder === 'string' && song.folder !== '') || (tops.size === 1 && !tops.has(''));
+    let prefix = hasFolder ? '' : `${uniqueChild(dir, safeFileName(song.title, 'Song'))}/`;
+    const clash = () => rel.some((r) => {
+      const size = written.get(`${dir}/${prefix}${r}`.toLowerCase());
+      return size !== undefined && size !== files[rel.indexOf(r)].blob.size;
+    });
+    if (clash()) {
+      const first = hasFolder ? rel[0].split('/')[0] : safeFileName(song.title, 'Song');
+      const renamed = uniqueChild(dir, first);
+      if (hasFolder) rel = rel.map((r) => (r.split('/')[0].toLowerCase() === first.toLowerCase() ? renamed + r.slice(first.length) : r));
+      else prefix = `${renamed}/`;
+    }
+    files.forEach((f, i) => {
+      const name = `${dir}/${prefix}${rel[i]}`;
+      if (written.has(name.toLowerCase())) return;
+      written.set(name.toLowerCase(), f.blob.size);
+      entries.push({ name, blob: f.blob });
+    });
+  }
+  return { top, entries };
+}
+
+async function writeToFolder(root, entries) {
+  const dirCache = new Map([['', root]]);
+  const dirHandle = async (path) => {
+    if (dirCache.has(path)) return dirCache.get(path);
+    const parent = await dirHandle(dirname(path));
+    const h = await parent.getDirectoryHandle(basename(path), { create: true });
+    dirCache.set(path, h);
+    return h;
+  };
+  for (let i = 0; i < entries.length; i++) {
+    el.overlayText.textContent = `Writing ${i + 1} / ${entries.length}…`;
+    const { name, blob } = entries[i];
+    const dir = await dirHandle(dirname(name));
+    const fh = await dir.getFileHandle(basename(name), { create: true });
+    const w = await fh.createWritable();
+    await w.write(blob);
+    await w.close();
+  }
+}
+
+async function exportLibrary(rootId) {
+  const what = rootId ? `the box “${boxTitle(libBoxes.find((b) => b.id === rootId) || {})}”` : 'the whole library';
+  // Chromium can write a real folder tree; elsewhere it's a ZIP.
+  let folder = null;
+  if (window.showDirectoryPicker) {
+    const asFolder = confirm(`Export ${what}.\n\nOK: save into a folder you choose (for DTXMania's Songs folder).\nCancel: download a ZIP instead.`);
+    if (asFolder) {
+      try {
+        folder = await window.showDirectoryPicker({ mode: 'readwrite' });
+      } catch (err) {
+        if (err?.name === 'AbortError') return;
+        throw err;
+      }
+    }
+  }
+  try {
+    showOverlay('Collecting files…');
+    const { top, entries } = await buildLibraryExport(rootId);
+    if (!entries.length) throw new Error('There is nothing to export here.');
+    if (folder) {
+      await writeToFolder(folder, entries);
+      hideOverlay();
+      alert(`Exported ${entries.length} files into “${folder.name}/${top}”.`);
+    } else {
+      const zip = await createZip(entries, {
+        onProgress: (i, n) => { el.overlayText.textContent = `Building ZIP… ${i} / ${n}`; },
+      });
+      downloadBlob(zip, `${top}.zip`);
+    }
+  } catch (err) {
+    console.error(err);
+    alert(`Failed to export:\n${err.message}`);
   }
   hideOverlay();
 }
@@ -1720,9 +2344,12 @@ async function saveSongSync(song, fileMap, sync, putFiles = [], deletePaths = []
     charts.push({ path: d.path, origPath: d.path, blob: dtxBlob(gpChartText(model, sync, d.path)) });
   }
   for (const f of charts) fileMap.set(f.path, f.blob);
-  const updated = { ...song, sync, size: [...fileMap.values()].reduce((a, b) => a + b.size, 0) };
-  await updateSong(updated, [...putFiles, ...charts], deletePaths);
-  return updated;
+  const size = [...fileMap.values()].reduce((a, b) => a + b.size, 0);
+  // Only sync and size change; the rest of the stored record (box, artist,
+  // …) stays as it is now, not as it was when the chart was opened.
+  const saved = await patchSong(song.id, (s) => { s.sync = sync; s.size = size; }, [...putFiles, ...charts], deletePaths);
+  if (!saved) throw new Error('This song was deleted from the library.');
+  return saved;
 }
 
 // Regenerates every chart of the open song for a new sync state, saves it,
@@ -2526,10 +3153,9 @@ async function buildStorageSection() {
       }
       const songs = new Map((await listSongs()).map((s) => [s.id, s]));
       for (const [songId, files] of bySong) {
-        const song = songs.get(songId);
-        if (!song) continue; // orphaned files: leave them to deleteSong
+        if (!songs.has(songId)) continue; // orphaned files: leave them to deleteSong
         const freed = files.reduce((a, f) => a + f.size, 0);
-        await updateSong({ ...song, size: Math.max(0, (song.size || 0) - freed) }, [], files.map((f) => f.path));
+        await patchSong(songId, (song) => { song.size = Math.max(0, (song.size || 0) - freed); }, [], files.map((f) => f.path));
       }
       alert(`Removed ${vids.length} video file${vids.length > 1 ? 's' : ''}, freeing ${fmtSize(vidBytes)}.`);
     } catch (err) {
@@ -2582,7 +3208,14 @@ document.addEventListener('keydown', (e) => {
     else if (!el.screenPlayer.hidden) backToSelect();
     return;
   }
-  if (el.screenPlayer.hidden) return;
+  if (el.screenPlayer.hidden) {
+    const typing = /^(INPUT|SELECT|TEXTAREA)$/.test(e.target.tagName) || document.querySelector('dialog[open]') || !lanePanel.hidden;
+    if (e.key === '/' && !typing && !e.metaKey && !e.ctrlKey && !e.altKey) {
+      e.preventDefault();
+      $('lib-search').focus();
+    }
+    return;
+  }
   if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
   if (e.code === 'Space') {
     // preventDefault also cancels space-activation of a focused button,

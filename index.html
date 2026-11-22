@@ -30,7 +30,68 @@
     (OGG / WAV / MP3), or a Guitar Pro file with a drum track. Imported songs
     are stored in this browser so they stay available next time.
   </p>
+  <section id="lib-bar">
+    <div class="lib-row">
+      <nav id="lib-crumbs" aria-label="Library location"></nav>
+      <button id="btn-new-box" class="btn small" title="Create a box (folder) in the box you're in">New box</button>
+      <button id="btn-export-lib" class="btn small" title="Download this box, or the whole library at the top level, as DTXMania folders">Export</button>
+    </div>
+    <div class="lib-row">
+      <div class="lib-search">
+        <input id="lib-search" type="search" placeholder="Search title, artist, box, genre…  ( / )" autocomplete="off" spellcheck="false">
+        <select id="lib-scope" title="Where to search">
+          <option value="all">Everywhere</option>
+          <option value="box">This box</option>
+        </select>
+      </div>
+    </div>
+    <div class="lib-row lib-filters">
+      <label>Level <input id="flt-lvl-min" type="number" min="0" max="10" step="0.1" inputmode="decimal" placeholder="min"></label>
+      <span class="lib-dash">–</span>
+      <input id="flt-lvl-max" type="number" min="0" max="10" step="0.1" inputmode="decimal" placeholder="max" aria-label="Maximum level">
+      <label>BPM <input id="flt-bpm-min" type="number" min="0" step="1" inputmode="numeric" placeholder="min"></label>
+      <span class="lib-dash">–</span>
+      <input id="flt-bpm-max" type="number" min="0" step="1" inputmode="numeric" placeholder="max" aria-label="Maximum BPM">
+      <select id="flt-kind" title="Kind of song">
+        <option value="">All kinds</option>
+        <option value="dtx">DTX</option>
+        <option value="gp">Guitar Pro</option>
+        <option value="rec">Has recording</option>
+        <option value="stems">Has stems</option>
+      </select>
+      <label>Sort <select id="lib-sort">
+        <option value="title">Title</option>
+        <option value="artist">Artist</option>
+        <option value="level">Level</option>
+        <option value="bpm">BPM</option>
+        <option value="added">Date added</option>
+      </select></label>
+      <button id="btn-clear-filters" class="btn small" hidden>Clear</button>
+    </div>
+  </section>
   <ul id="song-list"></ul>
+  <dialog id="box-dialog" class="panel-box">
+    <form method="dialog">
+      <h2 id="box-dialog-title">New box</h2>
+      <label class="field-row">Title <input id="box-title" required maxlength="200"></label>
+      <label class="field-row">Genre <input id="box-genre" maxlength="200"></label>
+      <label class="field-row">Colour <input id="box-color" type="color" value="#ffffff">
+        <span class="field-note"><input type="checkbox" id="box-color-on"> use</span></label>
+      <div class="panel-foot">
+        <button value="cancel" class="btn" formnovalidate>Cancel</button>
+        <button value="ok" class="btn primary">Save</button>
+      </div>
+    </form>
+  </dialog>
+  <dialog id="move-dialog" class="panel-box">
+    <form method="dialog">
+      <h2 id="move-dialog-title">Move to…</h2>
+      <ul id="move-tree" class="move-tree"></ul>
+      <div class="panel-foot">
+        <button value="cancel" class="btn">Cancel</button>
+      </div>
+    </form>
+  </dialog>
   <input type="file" id="file-zip" accept=".zip,application/zip,.gp,.gp3,.gp4,.gp5,.gpx" multiple hidden>
   <input type="file" id="file-folder" webkitdirectory hidden>
   <dialog id="gp-import" class="panel-box">

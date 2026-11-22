@@ -96,7 +96,28 @@ aren't served from the offline cache; pass `--sw` to test offline mode.
 - **Import URL** — download and import a ZIP directly from a URL. The hosting
   server must allow cross-origin requests (CORS); if it doesn't, download the
   file and use Import ZIP instead.
-- **Import Folder** — same, but from an unzipped song folder.
+- **Import Folder** — same, but from an unzipped song folder, or a whole
+  DTXMania `Songs` folder.
+- **Library tree** — imports follow DTXMania's folder rules: a folder named
+  `DTXFiles.<name>` or containing `box.def` becomes a **box**, `set.def` lists
+  a folder's songs (one song per `#TITLE` block), and other folders are
+  flattened into the box above them. All charts in one folder form one song
+  with several difficulties. A ZIP or folder can hold a single song or a
+  whole library; songs land in the box that is open, and songs already in the
+  library are skipped, so re-importing an updated library adds only what's
+  new. Tap a box to open it; the path at the top leads back.
+  **New box** creates one; a box's ⋯ menu edits its title, genre and colour,
+  moves it, exports it, or deletes it (keeping or deleting its songs). A
+  song's ⋯ menu has **Move to…**.
+- **Search** (press **/**) — finds songs by title, artist, difficulty label,
+  folder, and the title or genre of any box they're in. Every word must
+  match; full/half-width and hiragana/katakana don't matter. Search
+  everywhere or in the open box. Filters for level, BPM and kind (DTX, Guitar
+  Pro, has recording, has stems) work with or without a search, and **Sort**
+  orders boxes' songs and results (title, artist, level, BPM, date added).
+- **Export** (library bar) — downloads the open box, or the whole library at
+  the top level, as DTXMania folders with `box.def` files: into a folder you
+  choose (Chrome, Edge) or as a ZIP (any size; Zip64 when needed).
 - Imported songs are stored in the browser (IndexedDB), so they persist across
   visits on the same device. Each card shows the artist and BPM. Delete them
   per-song from the list.
