@@ -74,6 +74,8 @@ const settings = {
   gpFeet: { kickSplit: true, hhClose: true }, // last choice in the GP import dialog
   keepVideos: false, // store BGA videos found in imports (they aren't played)
   libSort: 'title',  // library order: title | artist | level | bpm | added
+  countIn: 0,        // bars of clicks before Play and each loop pass (0 = off)
+  volClick: 0.8,     // count-in click volume
 };
 try {
   const saved = JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{}');
@@ -115,6 +117,8 @@ function applySettings(p) {
   p.setVolume(settings.volMaster);
   p.setBgmVolume(settings.volBgm);
   p.setNotesVolume(settings.volNotes);
+  p.setClickVolume(settings.volClick);
+  p.countInBars = settings.countIn;
   p.setColors(settings.colors);
   p.setDisplay(settings.display);
   p.setGroups(settings.groups);       // rebuilds lanes,
@@ -1468,7 +1472,7 @@ async function openChart(song, chartInfo, { fileMap = null, at = 0, autoplay = t
       el.btnPlay.textContent = 'Play';
       return;
     }
-    await player.play();
+    await player.play({ countIn: true });
     el.btnPlay.textContent = 'Pause';
 
     // iOS: if decoding took long enough that the resume fell outside the
@@ -1532,7 +1536,7 @@ $('btn-play').onclick = async () => {
     player.pause();
     el.btnPlay.textContent = 'Play';
   } else {
-    await player.play();
+    await player.play({ countIn: true });
     el.btnPlay.textContent = 'Pause';
   }
 };
@@ -1751,11 +1755,11 @@ $('btn-loop-clear').onclick = () => player?.clearLoop();
 
 $('btn-restart').onclick = () => {
   if (!player) return;
+  // From the top, with the count-in (also when restarting mid-song).
+  player.pause({ keepOutput: true });
   player.seek(0);
-  if (!player.playing) {
-    player.play();
-    el.btnPlay.textContent = 'Pause';
-  }
+  player.play({ countIn: true });
+  el.btnPlay.textContent = 'Pause';
 };
 
 el.seek.addEventListener('pointerdown', () => { seeking = true; });
@@ -1768,7 +1772,7 @@ el.seek.addEventListener('change', () => {
 // ---- shared setting setters (keep the bottom bar and the panel in sync) ----
 
 const steppers = { scroll: [], playSpeed: [], offsetGlobal: [], offsetChart: [], tabZoom: [], syncCoarse: [], syncFine: [], feetRun: [] };
-const volEls = { volMaster: [], volBgm: [], volNotes: [] }; // range inputs
+const volEls = { volMaster: [], volBgm: [], volNotes: [], volClick: [] }; // range inputs
 
 function refreshSteppers(key) {
   steppers[key] = steppers[key].filter((s) => s.el.isConnected);
@@ -1832,6 +1836,7 @@ const VOL_APPLY = {
   volMaster: (p, v) => p.setVolume(v),
   volBgm: (p, v) => p.setBgmVolume(v),
   volNotes: (p, v) => p.setNotesVolume(v),
+  volClick: (p, v) => p.setClickVolume(v),
 };
 
 function setVolumeSetting(key, v) {
@@ -2273,7 +2278,22 @@ function buildPlaybackSection() {
   const c = makeStepper('offsetChart');
   c.el.title = 'Extra offset for the currently open chart, added on top of the global display offset (song-time ms, scales with play speed)';
   row('Chart offset', c.el);
-  for (const [key, text] of [['volNotes', 'Notes volume'], ['volBgm', 'BGM volume'], ['volMaster', 'Master volume']]) {
+  const ci = document.createElement('select');
+  for (const [v, text] of [[0, 'Off'], [1, '1 bar'], [2, '2 bars'], [4, '4 bars']]) {
+    const o = document.createElement('option');
+    o.value = String(v);
+    o.textContent = text;
+    ci.append(o);
+  }
+  ci.value = String(settings.countIn);
+  ci.title = 'Clicks counted in before Play, Restart and each practice-loop pass, at the tempo and meter where playback starts';
+  ci.onchange = () => {
+    settings.countIn = Number(ci.value);
+    saveSettings();
+    if (player) player.countInBars = settings.countIn;
+  };
+  row('Count-in', ci);
+  for (const [key, text] of [['volClick', 'Count-in volume'], ['volNotes', 'Notes volume'], ['volBgm', 'BGM volume'], ['volMaster', 'Master volume']]) {
     const input = document.createElement('input');
     input.type = 'range';
     input.min = '0';

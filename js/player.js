@@ -8,6 +8,7 @@
 import { SoundBank } from './audio.js';
 import { Stretcher } from './stretch.js';
 import { assignSlices } from './stemslice.js';
+import { countInPlan } from './countin.js';
 
 // Note types the user can color independently. Colors are kept per type even
 // when lanes are grouped, so e.g. RD chips stay distinguishable on the CY lane.
@@ -198,6 +199,13 @@ export class Player {
     this.pausedAt = 0;
     this.startOffset = 0;
     this.ctxStart = 0;
+    // Count-in: bars of clicks before a user-started Play and each loop pass
+    // (0 = off). While counting in, _countIn = { start, plan } and song time
+    // runs from start - plan.seconds up to start.
+    this.countInBars = 0;
+    this._countIn = null;
+    this._bpm0 = 120;
+    this._bpmChanges = [];
     this.speed = 1.0;      // scroll speed (visual only)
     this.playSpeed = 1.0;  // playback tempo (audio + clock)
     this.globalOffset = 0; // display-audio offset in real seconds (visual
@@ -404,7 +412,16 @@ export class Player {
 
   get time() {
     if (!this.playing) return this.pausedAt;
-    return this.startOffset + Math.max(0, this.ctx.currentTime - this.ctxStart) * this.playSpeed;
+    const dt = this.ctx.currentTime - this.ctxStart;
+    if (dt < 0 && this._countIn) {
+      return this.startOffset + Math.max(dt * this.playSpeed, -this._countIn.plan.seconds);
+    }
+    return this.startOffset + Math.max(0, dt) * this.playSpeed;
+  }
+
+  // True while the count-in clicks before the start point are playing.
+  get countingIn() {
+    return !!this._countIn && this.playing && this.time < this._countIn.start;
   }
 
   // iOS unlocks audio only inside a user gesture. The Player is created (and the
@@ -430,6 +447,9 @@ export class Player {
     this.noteGain.connect(this.master);
     this.autoGain = this.ctx.createGain();
     this.autoGain.connect(this.master);
+    this.clickGain = this.ctx.createGain();
+    this.clickGain.gain.value = this._clickVol ?? 0.8;
+    this.clickGain.connect(this.master);
   }
 
   // Safari flips to the 'interrupted' state on backgrounding without always
@@ -448,6 +468,7 @@ export class Player {
       master: this.master.gain.value,
       note: this.noteGain.gain.value,
       auto: this.autoGain.gain.value,
+      click: this.clickGain.gain.value,
     };
     // Sources belong to the dying context; drop the stale bookkeeping.
     this._sources.clear();
@@ -462,6 +483,7 @@ export class Player {
     this.master.gain.value = vol.master;
     this.noteGain.gain.value = vol.note;
     this.autoGain.gain.value = vol.auto;
+    this.clickGain.gain.value = vol.click;
     this.bank.ctx = this.ctx;
     this._attachStateListener();
     this._audioDegraded = false;
@@ -486,6 +508,9 @@ export class Player {
     this.bars = dtx.bars;
     this.beats = dtx.beats || [];
     this._chartEnd = dtx.chartEnd;
+    this._bpm0 = dtx.bpm;
+    this._bpmChanges = dtx.bpmChanges || [];
+    this._countIn = null;
     this.loop = null;
     this.onLoopChange?.(null);
     this._rebuildLanes();
@@ -511,16 +536,26 @@ export class Player {
     return assignSlices(this.chips, bgmTime, data);
   }
 
-  async play() {
+  // countIn: play countInBars bars of clicks first (a user-started Play or a
+  // loop pass). Internal restarts (seek while playing, speed change) don't.
+  async play({ countIn = false } = {}) {
     if (this.playing || !this.chips.length) return;
     clearTimeout(this._releaseTimer);
     this._releaseTimer = null;
     await this._ensureRunning();
+    if (this.playing) return; // a second play() finished first
     if (this.pausedAt >= this.duration - 0.05) this.pausedAt = 0;
 
     this.startOffset = this.pausedAt;
-    this.ctxStart = this.ctx.currentTime + START_DELAY;
+    const plan = countIn
+      ? countInPlan({ bars: this.bars, bpm: this._bpm0, bpmChanges: this._bpmChanges }, this.startOffset, this.countInBars)
+      : null;
+    this._countIn = plan ? { start: this.startOffset, plan } : null;
+    this.ctxStart = this.ctx.currentTime + START_DELAY + (plan ? plan.seconds / this.playSpeed : 0);
     this.playing = true;
+    if (plan) {
+      for (const c of plan.clicks) this._playClick(this.ctxStart + (c.t - this.startOffset) / this.playSpeed, c.accent);
+    }
     this._tabScroll = 0; // resume following the playhead
     this._resetPointers(this.startOffset);
 
@@ -553,7 +588,9 @@ export class Player {
   // jump, play-speed change). Otherwise the output is released (see below).
   pause({ keepOutput = false } = {}) {
     if (!this.playing) return;
-    this.pausedAt = Math.min(this.time, this.duration);
+    // Paused during a count-in: stay at the start point.
+    this.pausedAt = Math.min(Math.max(this.time, this._countIn?.start ?? -Infinity), this.duration);
+    this._countIn = null;
     this.playing = false;
     clearInterval(this._schedTimer);
     this._schedTimer = null;
@@ -599,7 +636,7 @@ export class Player {
     v = Math.max(0.1, v);
     if (Math.abs(v - this.playSpeed) < 1e-9) return;
     const wasPlaying = this.playing;
-    const t = this.time;
+    const t = this.countingIn ? this._countIn.start : this.time;
     if (wasPlaying) this.pause({ keepOutput: true });
     this.playSpeed = v;
     const gen = this._stretchGen + 1;
@@ -939,9 +976,10 @@ export class Player {
   _tick() {
     const now = this.time;
     if (this.loop?.enabled && now >= this.loop.endTime - 0.005) {
-      this.seek(this.loop.startTime);
+      this._restartLoop();
       return;
     }
+    if (this._countIn && now >= this._countIn.start) this._countIn = null;
     if (now >= this.duration) {
       this.pause();
       this.pausedAt = this.duration;
@@ -954,6 +992,37 @@ export class Player {
       const c = this.chips[this._schedIdx++];
       this._playChip(c, this.ctxStart + (c.time - this.startOffset) / this.playSpeed, 0);
     }
+  }
+
+  // Back to the loop start for the next pass, with a count-in.
+  _restartLoop() {
+    this.pause({ keepOutput: true });
+    this.pausedAt = Math.max(0, Math.min(this.loop.startTime, this.duration));
+    this._tabScroll = 0;
+    this._resetPointers(this.pausedAt);
+    this.play({ countIn: true });
+  }
+
+  setClickVolume(v) {
+    this._clickVol = v;
+    this.clickGain.gain.value = v;
+  }
+
+  // A short synthesized stick click (higher and louder on beat 1).
+  _playClick(when, accent) {
+    const at = Math.max(when, this.ctx.currentTime);
+    const osc = this.ctx.createOscillator();
+    osc.type = 'triangle';
+    osc.frequency.value = accent ? 2000 : 1400;
+    const env = this.ctx.createGain();
+    env.gain.setValueAtTime(0.0001, at);
+    env.gain.exponentialRampToValueAtTime(accent ? 1 : 0.6, at + 0.002);
+    env.gain.exponentialRampToValueAtTime(0.0001, at + 0.06);
+    osc.connect(env).connect(this.clickGain);
+    osc.start(at);
+    osc.stop(at + 0.07);
+    this._sources.add(osc);
+    osc.onended = () => this._sources.delete(osc);
   }
 
   _playChip(chip, when, offset) {
@@ -1081,8 +1150,34 @@ export class Player {
       g.fillRect(0, this.tabPos === 'top' ? region.h - 1 : region.top, W, 1);
     }
 
+    if (this.countingIn) this._renderCountIn(g, W, H);
+
     this.onFrame?.(this);
   };
+
+  // The count-in beat number ("1 2 3 4"), fading over each beat.
+  _renderCountIn(g, W, H) {
+    const t = this.time;
+    const clicks = this._countIn.plan.clicks;
+    let i = -1;
+    while (i + 1 < clicks.length && clicks[i + 1].t <= t) i++;
+    if (i < 0) return;
+    const c = clicks[i];
+    const next = clicks[i + 1]?.t ?? this._countIn.start;
+    const p = Math.min(1, (t - c.t) / Math.max(0.05, next - c.t));
+    const size = Math.round(Math.min(W, H) * 0.2);
+    g.save();
+    g.globalAlpha = 1 - 0.65 * p;
+    g.font = `700 ${size}px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif`;
+    g.textAlign = 'center';
+    g.textBaseline = 'middle';
+    g.lineWidth = Math.max(3, size / 14);
+    g.strokeStyle = 'rgba(0,0,0,0.75)';
+    g.strokeText(String(c.beat), W / 2, H * 0.42);
+    g.fillStyle = c.accent ? '#ffd24d' : '#ffffff';
+    g.fillText(String(c.beat), W / 2, H * 0.42);
+    g.restore();
+  }
 
   // Falling-notes lanes, rendered into the [y0, y1) band.
   _renderLanes(g, W, y0, y1, now) {
@@ -1242,6 +1337,8 @@ export class Player {
     const noteH = 11;
     // One global animation frame for all chips, like NX's single counter.
     const chipFrame = skin ? skin.chipFrame(performance.now()) : 0;
+    // During a count-in, notes before the start point don't play: dim them.
+    const fadeBefore = this.countingIn ? this._countIn.start - 1e-6 : -Infinity;
     for (let i = lowerBound(this.notes, tMin); i < this.notes.length; i++) {
       const n = this.notes[i];
       if (n.time > tMax) break;
@@ -1251,6 +1348,7 @@ export class Player {
         if (disp.sudden && approach > span * 0.4) continue;
         if (disp.hidden && approach < span * 0.25) continue;
       }
+      if (fadeBefore > -Infinity) g.globalAlpha = n.time < fadeBefore ? 0.25 : 1;
       const y = yOf(n.time);
       const lane = lanes[n.lane];
       const foreign = !lane.channels.includes(n.ch);
@@ -1281,6 +1379,7 @@ export class Player {
         g.fillRect(lx, y - noteH / 2, lw, 2);
       }
     }
+    if (fadeBefore > -Infinity) g.globalAlpha = 1;
 
     // Skin hit explosions ("chip fire"), additive like NX, ~0.21s lifetime.
     if (skin) {

@@ -136,6 +136,12 @@ Scroll, play speed and offsets are adjusted with −/+ steppers (hold to
 repeat), or click the value and type any number in range.
 
 - **Scroll** (0.25x–10x, 0.25 steps) — visual note-scroll speed.
+- **Count-in** (Off / 1 / 2 / 4 bars) — clicks counted in before Play,
+  Restart and every pass of a practice loop, at the tempo and meter where
+  playback starts (one click per quarter note, beat 1 accented, a big beat
+  number on screen). The notes scroll in during the count; earlier notes are
+  dimmed and don't play. Seeking while playing and speed changes don't count
+  in. **Count-in volume** sets the click level.
 - **Play speed** (0.25x–2x, 0.05 steps) — actual playback tempo with **pitch-preserving
   time stretch**: the chart and audio slow down together while the on-screen
   scroll velocity stays the same, so notes spread out instead of crawling.
