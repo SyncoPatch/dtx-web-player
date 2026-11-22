@@ -21,6 +21,8 @@ import { buildTimedChart, barTimesForSync } from './gpsync.js';
 import { assignFeet, kickKey, pedalKey, DEFAULT_FEET, CH_BD, CH_LBD, CH_LP } from './feet.js';
 import { SoundBank } from './audio.js';
 import { ROLES, listModels, removeModel, installFromFiles, installFromUrl, opfsAvailable } from './models.js';
+import { fromDtx, toDtx } from './chartdoc.js';
+import { Editor, GRIDS } from './editor.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -1182,6 +1184,15 @@ function showCardMenu(btn, song) {
   menu.append(moveItem, zipItem);
   for (const d of song.dtxs) {
     const name = d.label || d.title || basename(d.path);
+    const edit = document.createElement('button');
+    edit.className = 'card-menu-item';
+    edit.textContent = `Edit chart \u2014 ${name}`;
+    if (song.source === 'guitarpro') edit.title = 'Guitar Pro charts can\u2019t be edited yet';
+    edit.onclick = () => {
+      closeCardMenu();
+      openEditor(song, d);
+    };
+    menu.append(edit);
     const view = document.createElement('button');
     view.className = 'card-menu-item';
     view.textContent = `Chart image — ${name}`;
@@ -1226,7 +1237,7 @@ async function exportSongZip(song) {
     // origPath is the user's file name), so use those; DTX packages keep
     // their original names and case.
     const gp = song.source === 'guitarpro';
-    const blob = await createZip(files.map((f) => ({
+    const blob = await createZip(files.filter((f) => !isOrigPath(f.path)).map((f) => ({
       name: `${folder}/${((gp ? f.path : f.origPath) || f.path).replace(/^\/+/, '')}`,
       blob: f.blob,
     })));
@@ -1289,7 +1300,7 @@ async function buildLibraryExport(rootId) {
     const box = song.box && byId.has(song.box) ? song.box : null;
     if (inScope && !inScope.has(box)) continue;
     const dir = dirOf(box);
-    const files = await getSongFiles(song.id);
+    const files = (await getSongFiles(song.id)).filter((f) => !isOrigPath(f.path));
     if (!files.length) continue;
     const gp = song.source === 'guitarpro';
     let rel = files.map((f) => ((gp ? f.path : f.origPath) || f.path).replace(/^\/+/, ''));
@@ -1539,6 +1550,278 @@ $('btn-play').onclick = async () => {
     el.btnPlay.textContent = 'Pause';
   }
 };
+
+// ---- chart editor ----
+
+// Imported charts keep their file as it was imported under this prefix the
+// first time an edit is saved, for "Revert to original". Such files are left
+// out of exports.
+const ORIG_PREFIX = '#orig/';
+const isOrigPath = (p) => p.startsWith(ORIG_PREFIX);
+
+let editor = null;     // Editor (created on first use)
+let ed = null;         // { song, chartInfo, files: Map(path -> record), from, at, saved }
+let edPlayer = null;   // its own Player for previews (no visible canvas)
+let edLoaded = null;   // document the preview player has loaded
+let edRaf = 0;
+
+// Shift-JIS when every character fits (what DTXMania reads), else UTF-8
+// with a BOM; decodeText reads both.
+function encodeChart(text) {
+  const sjis = encodeShiftJIS(text);
+  if (new TextDecoder('shift_jis').decode(sjis) === text) return sjis;
+  const utf8 = new TextEncoder().encode(text);
+  const out = new Uint8Array(utf8.length + 3);
+  out.set([0xEF, 0xBB, 0xBF]);
+  out.set(utf8, 3);
+  return out;
+}
+
+function updateEditorChrome() {
+  if (!editor || !ed) return;
+  $('ed-save').classList.toggle('unsaved', editor.dirty);
+  $('ed-save').disabled = !editor.dirty;
+  $('ed-undo').disabled = !editor.undoStack.length;
+  $('ed-redo').disabled = !editor.redoStack.length;
+  const hasSel = editor.sel.size > 0;
+  $('ed-delete').disabled = !hasSel;
+  $('ed-copy').disabled = !hasSel;
+  $('ed-paste').disabled = !editor._clip?.length;
+  $('ed-revert').hidden = !ed.files.has(ORIG_PREFIX + ed.chartInfo.path);
+  for (const b of document.querySelectorAll('.ed-toolbar [data-tool]')) b.classList.toggle('active', b.dataset.tool === editor.tool);
+  $('ed-canvas').classList.toggle('select', editor.tool === 'select');
+  const notes = editor.doc.events.filter((e) => editor.chLane.has(e.ch)).length;
+  $('ed-sub').textContent = `${ed.chartInfo.label || ed.chartInfo.title || basename(ed.chartInfo.path)} · ${notes} notes`
+    + (hasSel ? ` · ${editor.sel.size} selected` : '');
+}
+
+function ensureEditor() {
+  if (editor) return editor;
+  const sel = $('ed-grid');
+  for (const g of GRIDS) {
+    const o = document.createElement('option');
+    o.value = String(g);
+    o.textContent = g % 3 === 0 ? `1/${g} (triplet)` : `1/${g}`;
+    sel.append(o);
+  }
+  editor = new Editor($('ed-canvas'), {
+    colors: settings.colors,
+    laneOrder: settings.laneOrder,
+    onChange: updateEditorChrome,
+    onSeek: (seconds) => {
+      if (edPlayer?.playing) edPlayer.seek(seconds);
+      else { editor.playBeat = null; editor.invalidate(); }
+    },
+    onStatus: (text) => { $('ed-status').textContent = text; },
+  });
+  sel.value = String(editor.grid);
+  sel.onchange = () => editor.setGrid(Number(sel.value));
+  for (const b of document.querySelectorAll('.ed-toolbar [data-tool]')) {
+    b.onclick = () => { editor.setTool(b.dataset.tool); updateEditorChrome(); };
+  }
+  $('ed-undo').onclick = () => editor.undo();
+  $('ed-redo').onclick = () => editor.redo();
+  $('ed-delete').onclick = () => editor.deleteSelection();
+  $('ed-copy').onclick = () => { editor.copy(); updateEditorChrome(); };
+  $('ed-paste').onclick = () => editor.paste();
+  $('ed-zoom-in').onclick = () => editor.zoom(1.25);
+  $('ed-zoom-out').onclick = () => editor.zoom(0.8);
+  $('ed-play').onclick = () => toggleEditorPlay();
+  $('ed-save').onclick = () => saveEditor();
+  $('ed-revert').onclick = () => revertEditor();
+  $('ed-close').onclick = () => closeEditor();
+  return editor;
+}
+
+// Open a chart in the editor. from: 'library' | 'player' (where Close
+// returns); at: song time to show first.
+async function openEditor(song, chartInfo, { from = 'library', at = 0 } = {}) {
+  if (song.source === 'guitarpro') {
+    alert('Guitar Pro charts can’t be edited yet: they are rebuilt from the Guitar Pro data whenever the recording timing changes. Editing them comes in a later update.');
+    return;
+  }
+  try {
+    showOverlay('Opening the editor…');
+    const fresh = (await getSong(song.id)) || song;
+    const info = fresh.dtxs.find((d) => d.path === chartInfo.path) || chartInfo;
+    const files = new Map((await getSongFiles(song.id)).map((f) => [f.path, f]));
+    const rec = files.get(info.path);
+    if (!rec) throw new Error('Chart file missing from local storage.');
+    const doc = fromDtx(decodeText(await rec.blob.arrayBuffer()));
+    ensureEditor();
+    player?.pause();
+    el.btnPlay.textContent = 'Play';
+    ed = { song: fresh, chartInfo: info, files, from, at, saved: false };
+    editor.colors = settings.colors;
+    editor.setLaneOrder(settings.laneOrder);
+    editor.setDoc(doc);
+    edLoaded = null;
+    $('ed-title').textContent = fresh.title;
+    el.screenSelect.hidden = true;
+    el.screenPlayer.hidden = true;
+    $('screen-editor').hidden = false;
+    hideOverlay();
+    requestAnimationFrame(() => {
+      if (at > 0) {
+        const beat = editor.t.beatOfTime(at);
+        editor.cursorBeat = beat;
+        editor.reveal(beat);
+      }
+      updateEditorChrome();
+    });
+  } catch (err) {
+    console.error(err);
+    hideOverlay();
+    alert(`Couldn’t open the editor:\n${err.message}`);
+  }
+}
+
+function editorVisible() {
+  return !$('screen-editor').hidden;
+}
+
+function stopEditorPlay() {
+  if (!edPlayer?.playing) return;
+  edPlayer.pause();
+  cancelAnimationFrame(edRaf);
+  if (editor.playBeat != null) editor.cursorBeat = editor.playBeat;
+  $('ed-play').textContent = 'Play';
+  editor.invalidate();
+}
+
+async function toggleEditorPlay() {
+  if (!ed) return;
+  if (edPlayer?.playing) { stopEditorPlay(); return; }
+  try {
+    if (!edPlayer) {
+      edPlayer = new Player(document.createElement('canvas'));
+      applySettings(edPlayer);
+      edPlayer.onEnded = () => stopEditorPlay();
+    }
+    if (edLoaded !== editor.doc) {
+      showOverlay('Loading sounds…');
+      const dtx = parseDTX(toDtx(editor.doc));
+      if (!dtx.chips.length) throw new Error('This chart has no notes or sounds to play yet.');
+      const fileMap = new Map([...ed.files].filter(([p]) => !isOrigPath(p)).map(([p, f]) => [p, f.blob]));
+      await edPlayer.load(dtx, makeResolver(fileMap, dirname(ed.chartInfo.path)));
+      edLoaded = editor.doc;
+      hideOverlay();
+    }
+    const from = editor.playBeat ?? editor.cursorBeat;
+    edPlayer.seek(Math.max(0, editor.t.timeOfBeat(from)));
+    await edPlayer.play();
+    $('ed-play').textContent = 'Stop';
+    const follow = () => {
+      if (!edPlayer.playing) return;
+      editor.playBeat = editor.t.beatOfTime(edPlayer.time);
+      editor.reveal(editor.playBeat);
+      edRaf = requestAnimationFrame(follow);
+    };
+    follow();
+  } catch (err) {
+    console.error(err);
+    hideOverlay();
+    alert(`Couldn’t play:\n${err.message}`);
+  }
+}
+
+async function saveEditor() {
+  if (!ed || !editor.dirty) return true;
+  try {
+    const text = toDtx(editor.doc);
+    const blob = new Blob([encodeChart(text)]);
+    const path = ed.chartInfo.path;
+    const rec = ed.files.get(path);
+    const origKey = ORIG_PREFIX + path;
+    const put = [{ path, origPath: rec?.origPath || path, blob }];
+    let delta = blob.size - (rec?.blob.size || 0);
+    if (rec && !ed.files.has(origKey)) {
+      put.push({ path: origKey, origPath: ORIG_PREFIX + (rec.origPath || path), blob: rec.blob });
+      delta += rec.blob.size;
+    }
+    const h = parseDTX(text, { headersOnly: true });
+    const saved = await patchSong(ed.song.id, (s) => {
+      const d = s.dtxs.find((x) => x.path === path);
+      if (d) {
+        if (h.title) d.title = h.title;
+        d.level = h.level;
+        d.bpm = h.bpm;
+      }
+      s.size = Math.max(0, (s.size || 0) + delta);
+    }, put);
+    if (!saved) throw new Error('This song was deleted from the library.');
+    for (const f of put) ed.files.set(f.path, f);
+    ed.song = saved;
+    ed.chartInfo = saved.dtxs.find((x) => x.path === path) || ed.chartInfo;
+    ed.saved = true;
+    editor.markSaved();
+    return true;
+  } catch (err) {
+    console.error(err);
+    alert(`Couldn’t save the chart:\n${err.message}`);
+    return false;
+  }
+}
+
+async function revertEditor() {
+  if (!ed) return;
+  const path = ed.chartInfo.path;
+  const orig = ed.files.get(ORIG_PREFIX + path);
+  if (!orig) return;
+  if (!confirm('Discard every saved edit to this chart and restore it as it was imported? This can’t be undone.')) return;
+  try {
+    stopEditorPlay();
+    const rec = ed.files.get(path);
+    const h = parseDTX(decodeText(await orig.blob.arrayBuffer()), { headersOnly: true });
+    const put = [{ path, origPath: rec?.origPath || path, blob: orig.blob }];
+    const saved = await patchSong(ed.song.id, (s) => {
+      const d = s.dtxs.find((x) => x.path === path);
+      if (d) { d.title = h.title || d.title; d.level = h.level; d.bpm = h.bpm; }
+      s.size = Math.max(0, (s.size || 0) - (rec?.blob.size || 0));
+    }, put, [ORIG_PREFIX + path]);
+    if (!saved) throw new Error('This song was deleted from the library.');
+    ed.files.set(path, put[0]);
+    ed.files.delete(ORIG_PREFIX + path);
+    ed.song = saved;
+    ed.saved = true;
+    editor.setDoc(fromDtx(decodeText(await orig.blob.arrayBuffer())), { keepView: true });
+    edLoaded = null;
+    updateEditorChrome();
+  } catch (err) {
+    console.error(err);
+    alert(`Couldn’t revert:\n${err.message}`);
+  }
+}
+
+async function closeEditor() {
+  if (!ed) return;
+  if (editor.dirty && !confirm('Leave the editor without saving your changes?')) return;
+  stopEditorPlay();
+  const { song, chartInfo, from, saved } = ed;
+  const at = editor.t.timeOfBeat(editor.cursorBeat);
+  ed = null;
+  $('screen-editor').hidden = true;
+  if (from === 'player') {
+    if (saved) {
+      const fresh = (await getSong(song.id)) || song;
+      await openChart(fresh, fresh.dtxs.find((d) => d.path === chartInfo.path) || chartInfo, { at, autoplay: false });
+    } else {
+      el.screenPlayer.hidden = false;
+    }
+  } else {
+    el.screenSelect.hidden = false;
+    if (saved) renderSongList();
+  }
+}
+
+$('btn-edit').onclick = () => {
+  if (!current) return;
+  openEditor(current.song, current.chartInfo, { from: 'player', at: Math.max(0, player?.time || 0) });
+};
+
+window.addEventListener('beforeunload', (e) => {
+  if (ed && editor?.dirty) { e.preventDefault(); e.returnValue = ''; }
+});
 
 // ---- PDF export ----
 
@@ -3306,6 +3589,20 @@ $('lane-reset').onclick = () => {
 };
 
 document.addEventListener('keydown', (e) => {
+  if (editorVisible() && ed) {
+    if (/^(INPUT|SELECT|TEXTAREA)$/.test(e.target.tagName) || document.querySelector('dialog[open]')) return;
+    if ((e.metaKey || e.ctrlKey) && (e.key === 's' || e.key === 'S')) { e.preventDefault(); saveEditor(); return; }
+    if (e.code === 'Space') { e.preventDefault(); toggleEditorPlay(); return; }
+    if (e.key === '[' || e.key === ']') {
+      const i = GRIDS.indexOf(editor.grid) + (e.key === ']' ? 1 : -1);
+      if (GRIDS[i]) { editor.setGrid(GRIDS[i]); $('ed-grid').value = String(GRIDS[i]); }
+      e.preventDefault();
+      return;
+    }
+    if (editor.key(e)) { e.preventDefault(); updateEditorChrome(); return; }
+    if (e.code === 'Escape') closeEditor();
+    return;
+  }
   if (e.code === 'Escape') {
     if (openMenu) closeCardMenu();
     else if (!lanePanel.hidden) lanePanel.hidden = true;
