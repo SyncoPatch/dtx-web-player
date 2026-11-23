@@ -137,10 +137,70 @@
       <button id="ed-zoom-out" class="btn small" title="Zoom out (−)">−</button>
       <button id="ed-zoom-in" class="btn small" title="Zoom in (+)">+</button>
     </span>
+    <span class="ed-group">
+      <button id="ed-measure" class="btn small" title="Insert or delete a measure, change its length or the tempo at the cursor (also: right-click or long-press a measure number)">Measure…</button>
+      <button id="ed-sounds-btn" class="btn small toggle" title="Sounds (#WAV): see the chart’s sounds and change the sound of the selected notes">Sounds</button>
+      <button id="ed-props" class="btn small" title="Title, artist, genre, level and start BPM">Chart…</button>
+    </span>
     <button id="ed-play" class="btn small primary" title="Play from the last clicked spot (Space)">Play</button>
     <span id="ed-status"></span>
   </div>
-  <div id="ed-wrap"><canvas id="ed-canvas"></canvas></div>
+  <div id="ed-wrap">
+    <canvas id="ed-canvas"></canvas>
+    <aside id="ed-sounds" hidden>
+      <div class="eds-head">
+        <strong>Sounds</strong>
+        <button id="eds-close" class="btn small" title="Close" aria-label="Close sounds">×</button>
+      </div>
+      <p id="eds-sel" class="eds-note"></p>
+      <input id="eds-filter" type="search" placeholder="Filter by name or number" autocomplete="off">
+      <ul id="eds-list"></ul>
+      <label class="eds-add">Add a sound <select id="eds-add"></select></label>
+    </aside>
+  </div>
+  <dialog id="ed-measure-dialog" class="panel-box ed-dialog">
+    <form method="dialog">
+      <h2 id="edm-title">Measure</h2>
+      <div class="edm-row">
+        <button type="button" id="edm-ins-before" class="btn small">Insert before</button>
+        <button type="button" id="edm-ins-after" class="btn small">Insert after</button>
+        <button type="button" id="edm-delete" class="btn small">Delete measure</button>
+      </div>
+      <h3>Length</h3>
+      <div class="edm-row">
+        <input id="edm-num" type="number" min="1" max="128" step="1" inputmode="numeric" aria-label="Beats">
+        <span>/</span>
+        <select id="edm-den" aria-label="Beat unit"><option>4</option><option>8</option><option>16</option></select>
+        <button type="button" id="edm-len-apply" class="btn small">Apply</button>
+      </div>
+      <label class="display-row"><input type="checkbox" id="edm-len-run"> <span id="edm-len-run-label"></span></label>
+      <h3>Tempo</h3>
+      <p id="edm-bpm-at" class="panel-note"></p>
+      <div class="edm-row">
+        <input id="edm-bpm" type="number" min="1" max="9999" step="any" inputmode="decimal" aria-label="BPM">
+        <span>BPM</span>
+        <button type="button" id="edm-bpm-set" class="btn small">Set</button>
+        <button type="button" id="edm-bpm-remove" class="btn small">Remove change</button>
+      </div>
+      <div class="panel-foot">
+        <button value="cancel" class="btn">Close</button>
+      </div>
+    </form>
+  </dialog>
+  <dialog id="ed-props-dialog" class="panel-box ed-dialog">
+    <form method="dialog">
+      <h2>Chart</h2>
+      <label class="field-row">Title <input id="edp-title" maxlength="300"></label>
+      <label class="field-row">Artist <input id="edp-artist" maxlength="300"></label>
+      <label class="field-row">Genre <input id="edp-genre" maxlength="300"></label>
+      <label class="field-row">Level <input id="edp-level" maxlength="10" inputmode="decimal" placeholder="1–100"></label>
+      <label class="field-row">Start BPM <input id="edp-bpm" type="number" min="1" max="9999" step="any" inputmode="decimal" required></label>
+      <div class="panel-foot">
+        <button value="cancel" class="btn" formnovalidate>Cancel</button>
+        <button value="ok" class="btn primary">Apply</button>
+      </div>
+    </form>
+  </dialog>
 </main>
 
 <main id="screen-player" class="screen" hidden>

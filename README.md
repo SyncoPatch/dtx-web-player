@@ -136,7 +136,18 @@ aren't served from the offline cache; pass `--sw` to test offline mode.
   - **Snap** sets the grid, 1/4 to 1/192 including triplets (`[` `]`).
   - Copy and paste (⌘C / ⌘V, pasted at the last clicked spot or the playhead),
     Delete, undo and redo (⌘Z / ⇧⌘Z), zoom (+ / − or ⌘-wheel; pinch on touch).
-  - Drag the measure numbers to scroll; tap them to move the playhead.
+  - Drag the measure numbers to scroll; tap them to move the playhead (the
+    dashed blue line is the cursor, where Paste, Play and tempo changes go).
+  - **Measure…** (or right-click / long-press a measure number): insert a
+    measure before or after, delete it, set its length (e.g. 3/4, 7/8; notes
+    keep their beat) for it alone or up to the next length change, and set or
+    remove a tempo change at the cursor. Later notes move with their measures.
+  - **Sounds** lists the chart's `#WAV` sounds with how often each is used and
+    a ▶ preview. Select notes and press **Use** to give them a sound (new notes
+    of those types use it too); **Add a sound** defines one of the song's audio
+    files that the chart doesn't use yet.
+  - **Chart…** sets the title, artist, genre, level and start BPM.
+  - Every edit, structure and sounds included, can be undone.
   - **Play** (Space) plays the chart as edited from the last clicked spot, with
     a playhead that follows.
   - **Save** (⌘S) writes the chart in place. The DTX file keeps everything the
