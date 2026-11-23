@@ -313,3 +313,136 @@ export function extend(doc, count) {
   while (lens.length < count) lens.push(last);
   return { ...doc, lens };
 }
+
+// ---- structure: measures, lengths, tempo ----
+
+// A decimal measure length as an exact fraction (0.875 -> 7/8), by
+// continued fractions up to a denominator of maxDen.
+export function toFrac(x, maxDen = 3840) {
+  let [h0, h1, k0, k1] = [0, 1, 1, 0];
+  let v = x;
+  for (let i = 0; i < 32; i++) {
+    const a = Math.floor(v);
+    const [h2, k2] = [a * h1 + h0, a * k1 + k0];
+    if (k2 > maxDen) break;
+    [h0, h1, k0, k1] = [h1, h2, k1, k2];
+    if (Math.abs(v - a) < 1e-12 || Math.abs(h1 / k1 - x) < 1e-12) break;
+    v = 1 / (v - a);
+  }
+  return frac(h1, k1);
+}
+
+const withLens = (doc, count) => (doc.lens.length >= count ? [...doc.lens] : extend(doc, count).lens);
+
+// Insert `count` empty measures before measure `at`, as long as the measure
+// that was there (or the last one). Later notes and tempo changes move with
+// their measures.
+export function insertMeasures(doc, at, count = 1) {
+  const len = lenOf(doc, at);
+  const lens = withLens(doc, at);
+  lens.splice(at, 0, ...new Array(count).fill(len));
+  const events = doc.events.map((e) => (e.m >= at ? { ...e, m: e.m + count } : e));
+  return { ...doc, lens, events };
+}
+
+// Delete measures [at, at + count) with their notes. A tempo change inside
+// them moves to the start of what follows, so later measures keep their tempo.
+export function deleteMeasures(doc, at, count = 1) {
+  const end = at + count;
+  const lens = [...doc.lens];
+  lens.splice(at, count);
+  const gone = doc.events.filter((e) => e.m >= at && e.m < end);
+  const events = doc.events.filter((e) => e.m < at || e.m >= end).map((e) => (e.m >= end ? { ...e, m: e.m - count } : e));
+  const lastBpm = gone.filter((e) => isBpmCh(e.ch)).at(-1);
+  const total = Math.max(lens.length, ...events.map((e) => e.m + 1), 0);
+  if (lastBpm && at < total && !events.some((e) => isBpmCh(e.ch) && e.m === at && e.pos.n === 0)) {
+    events.push({ ...lastBpm, m: at, pos: frac(0, 1) });
+  }
+  return sortEvents({ ...doc, lens, events });
+}
+
+// Events that a new length would cut off, for measures [from, to).
+export function eventsPastLength(doc, from, to, len) {
+  return doc.events.filter((e) => e.m >= from && e.m < to && fracValue(e.pos) * lenOf(doc, e.m) >= len - 1e-9);
+}
+
+// Give measures [from, to) a new length (in whole notes: 0.75 = 3/4).
+// Notes keep their beat within the measure; ones past the new end are
+// removed. Returns the new document.
+export function setMeasureLength(doc, from, to, len) {
+  const lens = withLens(doc, to);
+  const nf = toFrac(len);
+  const events = [];
+  for (const e of doc.events) {
+    if (e.m < from || e.m >= to) { events.push(e); continue; }
+    const of = toFrac(lenOf(doc, e.m));
+    const pos = frac(e.pos.n * of.n * nf.d, e.pos.d * of.d * nf.n);
+    if (pos.n < pos.d) events.push({ ...e, pos });
+  }
+  for (let m = from; m < to; m++) lens[m] = len;
+  return sortEvents({ ...doc, lens, events });
+}
+
+// The measure after `m` where the length changes (end of a run of equal
+// lengths), at most the chart's end.
+export function lengthRunEnd(doc, m) {
+  const total = measureCount(doc);
+  const len = lenOf(doc, m);
+  let end = m + 1;
+  while (end < total && Math.abs(lenOf(doc, end) - len) < 1e-12) end++;
+  return Math.max(end, m + 1);
+}
+
+// Tempo change written at a position (channel 03 or 08), or null.
+export function bpmEventAt(doc, m, pos) {
+  return doc.events.find((e) => isBpmCh(e.ch) && e.m === m && fracEq(e.pos, pos)) || null;
+}
+
+const fmtBpm = (bpm) => String(Math.round(bpm * 1000) / 1000);
+
+// Set the tempo from a position on. At the very start it is the #BPM header.
+// Other positions use channel 08 with a #BPMxx definition (any value,
+// decimals too), reusing a definition with the same value.
+export function setBpm(doc, m, pos, bpm) {
+  if (!(bpm > 0)) throw new Error('BPM must be above 0.');
+  let out = removeBpm(doc, m, pos);
+  if (m === 0 && pos.n === 0) return setHeader(out, 'BPM', fmtBpm(bpm));
+  let id = null;
+  const used = new Set();
+  for (const raw of out.headers) {
+    const c = command(raw);
+    const b = c?.cmd.match(/^BPM([0-9A-Z]{2})$/);
+    if (!b) continue;
+    used.add(b[1]);
+    if (!id && Math.abs(parseFloat(c.val) - bpm) < 1e-9) id = b[1];
+  }
+  if (!id) {
+    for (let i = 1; i < 36 * 36 && !id; i++) if (!used.has(base36(i))) id = base36(i);
+    if (!id) throw new Error('This chart already defines the maximum number of tempos (1295).');
+    out = setHeader(out, `BPM${id}`, fmtBpm(bpm));
+  }
+  return addEvents(out, [{ m, ch: 0x08, pos, val: id }]);
+}
+
+export function removeBpm(doc, m, pos) {
+  return { ...doc, events: doc.events.filter((e) => !(isBpmCh(e.ch) && e.m === m && fracEq(e.pos, pos))) };
+}
+
+// ---- sounds ----
+
+// Channels whose values are #WAV sounds (as js/dtx.js plays them).
+export const isSoundCh = (ch) => ch === 0x01 || (ch >= 0x11 && ch <= 0x1C) || (ch >= 0x31 && ch <= 0x3C) || (ch >= 0x61 && ch <= 0x92);
+
+// How many objects use each sound: Map(val -> count).
+export function wavUsage(doc) {
+  const out = new Map();
+  for (const e of doc.events) {
+    if (!isSoundCh(e.ch)) continue;
+    out.set(e.val, (out.get(e.val) || 0) + 1);
+  }
+  return out;
+}
+
+export function setEventsVal(doc, list, val) {
+  return updateEvents(doc, list, (e) => ({ ...e, val }));
+}

@@ -5,6 +5,8 @@ import { parseDTX } from '../js/dtx.js';
 import {
   fromDtx, toDtx, timing, positionAt, addEvents, removeEvents, shiftEvents, addWav, wavList,
   getHeader, setHeader, commonWav, frac, measureCount, extend,
+  toFrac, insertMeasures, deleteMeasures, setMeasureLength, eventsPastLength, lengthRunEnd,
+  setBpm, removeBpm, bpmEventAt, wavUsage, setEventsVal,
 } from '../js/chartdoc.js';
 
 // Same timeline: chips (time, channel, sound), bars, tempo changes.
@@ -134,4 +136,96 @@ test('extra empty measures at the end', () => {
   const doc = extend(fromDtx('#00002: 0.5\n#00011: 01'), 4);
   assert.equal(measureCount(doc), 4);
   assert.deepEqual(doc.lens, [0.5, 0.5, 0.5, 0.5]);
+});
+
+// Times of the drum chips, from the real parser.
+const drumTimes = (doc) => parseDTX(toDtx(doc)).chips.filter((c) => c.ch >= 0x11 && c.ch <= 0x1C).map((c) => c.time);
+const near = (a, b, msg) => assert.ok(Math.abs(a - b) < 1e-6, `${msg}: ${a} != ${b}`);
+
+test('toFrac reads written measure lengths exactly', () => {
+  assert.deepEqual(toFrac(0.875), frac(7, 8));
+  assert.deepEqual(toFrac(0.75), frac(3, 4));
+  assert.deepEqual(toFrac(1.5), frac(3, 2));
+  assert.deepEqual(toFrac(1), frac(1, 1));
+  assert.deepEqual(toFrac(5 / 12), frac(5, 12));
+});
+
+test('inserting a measure shifts later notes by exactly one measure', () => {
+  // 120 BPM, then 60 BPM from measure 2.
+  const src = '#BPM: 120\n#WAV01: a.wav\n#BPM01: 60\n#00011: 01\n#00111: 01\n#00208: 01\n#00211: 01\n#00311: 01';
+  const doc = fromDtx(src);
+  const before = drumTimes(doc);
+  // Before measure 1 (at 120 BPM: 2 s).
+  let after = drumTimes(insertMeasures(doc, 1));
+  near(after[0], before[0], 'm0');
+  for (let i = 1; i < 4; i++) near(after[i], before[i] + 2, `note ${i}`);
+  // Before measure 3 (at 60 BPM: 4 s); the tempo change stays at measure 2.
+  after = drumTimes(insertMeasures(doc, 3));
+  for (let i = 0; i < 3; i++) near(after[i], before[i], `note ${i}`);
+  near(after[3], before[3] + 4, 'last');
+  // Inside a 3/4 stretch the new measure is 3/4 too.
+  const w = insertMeasures(fromDtx('#00102: 0.75\n#00111: 01\n#00211: 01'), 2);
+  assert.deepEqual(w.lens, [1, 0.75, 0.75, 0.75]);
+  assert.match(toDtx(w), /#00311: 01/);
+});
+
+test('deleting a measure keeps the tempo that followed it', () => {
+  const src = '#BPM: 120\n#WAV01: a.wav\n#BPM01: 60\n#00011: 01\n#00108: 01\n#00111: 0101\n#00211: 01';
+  const doc = fromDtx(src);
+  const before = drumTimes(doc);
+  const out = deleteMeasures(doc, 1);
+  const after = drumTimes(out);
+  assert.equal(after.length, 2);
+  near(after[0], before[0], 'm0');
+  near(after[1], 2, 'm2 moved back one 120 BPM measure');
+  // The 60 BPM change now starts the old measure 2.
+  assert.ok(bpmEventAt(out, 1, frac(0, 1)));
+  const dtx = parseDTX(toDtx(out));
+  assert.deepEqual(dtx.bpmChanges.map((c) => [c.time, c.bpm]), [[2, 60]]);
+  assert.equal(measureCount(out), 2);
+});
+
+test('a new measure length keeps each note on its beat', () => {
+  const doc = fromDtx('#BPM: 60\n#WAV01: a.wav\n#00011: 01010101\n#00111: 01\n#00211: 01');
+  assert.equal(eventsPastLength(doc, 0, 1, 0.75).length, 1);
+  const out = setMeasureLength(doc, 0, 1, 0.75);
+  assert.deepEqual(drumTimes(out), [0, 1, 2, 3, 7]);
+  assert.deepEqual(out.lens.slice(0, 3), [0.75, 1, 1]);
+  assert.match(toDtx(out), /#00002: 0\.75\r\n#00011: 010101\r\n#00102: 1\r\n/);
+  // 7/8, then longer again: positions stay exact.
+  const odd = setMeasureLength(setMeasureLength(doc, 0, 3, 0.875), 0, 3, 1.25);
+  assert.deepEqual(drumTimes(odd), [0, 1, 2, 3, 5, 10]);
+  // A run of equal lengths ends where the length changes.
+  const run = fromDtx('#00102: 0.75\n#00302: 1\n#00511: 01');
+  assert.equal(lengthRunEnd(run, 1), 3);
+  assert.equal(lengthRunEnd(run, 4), 6); // to the end of the chart
+});
+
+test('tempo changes: header at the start, #BPMxx elsewhere', () => {
+  let doc = fromDtx('#BPM: 120\n#WAV01: a.wav\n#00011: 01\n#00111: 01\n#00211: 01\n#00311: 01');
+  doc = setBpm(doc, 0, frac(0, 1), 60);
+  assert.equal(getHeader(doc, 'BPM'), '60');
+  doc = setBpm(doc, 1, frac(0, 1), 150.5);
+  doc = setBpm(doc, 3, frac(0, 1), 150.5); // same value: same definition
+  const text = toDtx(doc);
+  assert.equal(text.match(/#BPM\w\w: 150\.5/g).length, 1);
+  assert.match(text, /#00108: 01/);
+  assert.match(text, /#00308: 01/);
+  const spb = 60 / 150.5;
+  assert.deepEqual(drumTimes(doc).map((t) => Math.round(t * 1e6)), [0, 4, 4 + 4 * spb, 4 + 8 * spb].map((t) => Math.round(t * 1e6)));
+  // Replacing and removing.
+  doc = setBpm(doc, 1, frac(0, 1), 240);
+  assert.equal(parseDTX(toDtx(doc)).bpmChanges[0].bpm, 240);
+  doc = removeBpm(doc, 1, frac(0, 1));
+  assert.equal(bpmEventAt(doc, 1, frac(0, 1)), null);
+  assert.deepEqual(parseDTX(toDtx(doc)).bpmChanges.map((c) => c.bpm), [150.5]);
+  assert.throws(() => setBpm(doc, 1, frac(0, 1), 0));
+});
+
+test('sound usage and changing a note’s sound', () => {
+  let doc = fromDtx('#WAV01: a.wav\n#WAV02: b.wav\n#00001: 02\n#00011: 0101\n#00012: 01');
+  assert.deepEqual([...wavUsage(doc)].sort(), [['01', 3], ['02', 1]]);
+  doc = setEventsVal(doc, doc.events.filter((e) => e.ch === 0x11), '02');
+  assert.match(toDtx(doc), /#00011: 0202/);
+  assert.deepEqual([...wavUsage(doc)].sort(), [['01', 1], ['02', 3]]);
 });

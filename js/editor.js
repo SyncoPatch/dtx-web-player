@@ -3,23 +3,28 @@
 // grid; Select picks (click, shift-click, rectangle) and drags notes in time
 // and across lanes; copy / paste, keyboard nudges and undo / redo. Touch:
 // one finger edits, two fingers scroll and pinch-zoom; dragging the measure
-// gutter scrolls, tapping it moves the playhead.
+// gutter scrolls, tapping it moves the playhead, right-click / long-press on
+// it opens the measure menu (insert, delete, length, tempo). Structure,
+// tempo, sound and header edits are undoable like note edits.
 
 import { LANE_IDS, LANE_DEF, CH_TYPE, defaultColors } from './player.js';
 import {
   timing, measureCount, measureStarts, lenOf, positionAt, addEvents, removeEvents, shiftEvents,
-  commonWav, extend, fracValue, DRUM_CHANNELS,
+  commonWav, extend, fracValue, frac, DRUM_CHANNELS, insertMeasures, deleteMeasures, setMeasureLength,
+  setBpm, removeBpm, setEventsVal, setHeader, getHeader,
 } from './chartdoc.js';
 
 export const GRIDS = [4, 8, 12, 16, 24, 32, 48, 64, 96, 192]; // steps per whole note
 const FINE = 3840;           // moves keep off-grid offsets (divisible by 2^8, 3, 5)
 const GUTTER = 76;           // measure numbers, lengths, BPM
 const FOOT = 28;             // lane labels
-const LANE_PX = 40;          // per width unit
+const LANE_PX = 40;          // per width unit (less on narrow screens)
+const LANE_PX_MIN = 22;
 const BGM_W = 30;
 const NOTE_H = 8;
 const EXTRA_MEASURES = 4;    // empty room after the last measure
 const UNDO_MAX = 200;
+const LONG_PRESS_MS = 500;
 // Lanes that hold two note types: [primary, alternate].
 const LANE_TYPES = { HH: [0x11, 0x18], LP: [0x1B, 0x1C] };
 const TYPE_NAME = { 0x11: 'HH', 0x18: 'OH', 0x1B: 'LP', 0x1C: 'LBD' };
@@ -27,13 +32,14 @@ const TYPE_NAME = { 0x11: 'HH', 0x18: 'OH', 0x1B: 'LP', 0x1C: 'LBD' };
 const keyOf = (e) => `${e.m}:${e.ch}:${e.pos.n}/${e.pos.d}:${e.val}`;
 
 export class Editor {
-  constructor(canvas, { colors = defaultColors(), laneOrder = LANE_IDS, onChange, onSeek, onStatus } = {}) {
+  constructor(canvas, { colors = defaultColors(), laneOrder = LANE_IDS, onChange, onSeek, onStatus, onMeasureMenu } = {}) {
     this.canvas = canvas;
     this.g = canvas.getContext('2d');
     this.colors = colors;
     this.onChange = onChange;
     this.onSeek = onSeek;
     this.onStatus = onStatus;
+    this.onMeasureMenu = onMeasureMenu;
     this.grid = 16;
     this.ppb = 44;           // pixels per beat
     this.tool = 'pen';
@@ -47,13 +53,14 @@ export class Editor {
     this.playBeat = null;
     this.cursorBeat = 0;     // where Paste goes
     this.lastVal = null;
+    this.penVal = new Map();  // channel -> sound picked for new notes
     this._drag = null;
     this._pointers = new Map();
     this._hover = null;
     this._clip = null;
     this.setLaneOrder(laneOrder);
 
-    this._ro = new ResizeObserver(() => this.invalidate());
+    this._ro = new ResizeObserver(() => { this._sz = null; this.invalidate(); });
     this._ro.observe(canvas);
     canvas.addEventListener('pointerdown', (e) => this._down(e));
     canvas.addEventListener('pointermove', (e) => this._move(e));
@@ -61,11 +68,16 @@ export class Editor {
     canvas.addEventListener('pointercancel', (e) => this._up(e, true));
     canvas.addEventListener('pointerleave', () => { this._hover = null; this.invalidate(); });
     canvas.addEventListener('wheel', (e) => this._wheel(e), { passive: false });
-    canvas.addEventListener('contextmenu', (e) => e.preventDefault());
+    canvas.addEventListener('contextmenu', (e) => {
+      e.preventDefault();
+      const p = this._local(e);
+      if (this.doc && p.x < this.x0 && p.y < this._size().H - FOOT) this._measureMenu(p.y);
+    });
   }
 
   setLaneOrder(order) {
     this.lanes = order.filter((id) => LANE_DEF[id]).map((id) => ({ id, ...LANE_DEF[id] }));
+    this._sz = null;
     this.chLane = new Map();
     this.lanes.forEach((l, i) => l.channels.forEach((ch) => this.chLane.set(ch, i)));
     this.invalidate();
@@ -73,11 +85,13 @@ export class Editor {
 
   setDoc(doc, { keepView = false } = {}) {
     this.doc = doc;
+    this._sz = null;
     this.undoStack = [];
     this.redoStack = [];
     this.dirty = false;
     this.sel.clear();
-    if (!keepView) this.scrollBeat = -0.5;
+    this.penVal.clear();
+    if (!keepView) { this.scrollBeat = -0.5; this.cursorBeat = 0; }
     this._timing = null;
     this.invalidate();
   }
@@ -91,22 +105,33 @@ export class Editor {
 
   shownMeasures() { return measureCount(this.doc) + EXTRA_MEASURES; }
 
+  // Canvas size, cached until it resizes (geometry is asked per note).
   _size() {
-    const r = this.canvas.getBoundingClientRect();
-    return { W: r.width, H: r.height };
+    if (!this._sz) {
+      const r = this.canvas.getBoundingClientRect();
+      this._sz = { W: r.width, H: r.height };
+      let units = 0;
+      for (const l of this.lanes) units += l.w;
+      this._px = Math.max(LANE_PX_MIN, Math.min(LANE_PX, Math.floor((r.width - GUTTER - BGM_W - 8) / units)));
+    }
+    return this._sz;
   }
 
   // Left edge of the lanes: centred, with room for the measure gutter.
   get x0() {
     const { W } = this._size();
     let w = 0;
-    for (const l of this.lanes) w += l.w * LANE_PX;
+    for (const l of this.lanes) w += l.w * this.lanePx;
     return Math.max(GUTTER, Math.round((W - w - BGM_W - 6) / 2));
   }
 
+  // Lane width per unit: shrinks so all lanes fit on a phone.
+  get lanePx() { this._size(); return this._px; }
+
   laneX(i) {
     let x = this.x0;
-    for (let k = 0; k < i; k++) x += this.lanes[k].w * LANE_PX;
+    const px = this.lanePx;
+    for (let k = 0; k < i; k++) x += this.lanes[k].w * px;
     return x;
   }
 
@@ -114,7 +139,7 @@ export class Editor {
 
   laneAt(x) {
     for (let i = 0; i < this.lanes.length; i++) {
-      const a = this.laneX(i), b = a + this.lanes[i].w * LANE_PX;
+      const a = this.laneX(i), b = a + this.lanes[i].w * this.lanePx;
       if (x >= a && x < b) return i;
     }
     return -1;
@@ -195,7 +220,8 @@ export class Editor {
   // then the last one used, then the most common drum sound.
   valFor(ch) {
     const lane = this.chLane.get(ch);
-    return commonWav(this.doc, ch)
+    return this.penVal.get(ch)
+      || commonWav(this.doc, ch)
       || this.lanes[lane]?.channels.map((c) => commonWav(this.doc, c)).find(Boolean)
       || this.lastVal
       || DRUM_CHANNELS.map((c) => commonWav(this.doc, c)).find(Boolean)
@@ -253,6 +279,82 @@ export class Editor {
     const after = moved.events.filter((e) => [...list].some((o) =>
       Math.abs(t2.beatOf(e.m, e.pos) - (this.beatOf(o) + beats)) < 1e-6 && e.ch === mapCh(o.ch) && e.val === o.val));
     return this.commit(moved, after);
+  }
+
+  // ---- structure, tempo, sounds, headers ----
+
+  // The measure containing a beat (the last one shown past the end).
+  measureAt(beat) {
+    const shown = this.shownMeasures();
+    const starts = measureStarts(this.doc, shown);
+    let m = 0;
+    while (m + 1 < shown && starts[m + 1] <= beat + 1e-9) m++;
+    return m;
+  }
+
+  // The cursor on the snap grid: { m, pos }.
+  cursorPos() {
+    return positionAt(this.doc, Math.max(0, this.cursorBeat), this.grid, this.shownMeasures())
+      || { m: this.measureAt(this.cursorBeat), pos: frac(0, 1) };
+  }
+
+  // Edits that change timing keep the cursor on its measure.
+  _structure(doc, cursorMeasure) {
+    if (!this.commit(doc, [])) return false;
+    if (cursorMeasure != null) this.cursorBeat = this.t.starts[cursorMeasure] ?? this.cursorBeat;
+    this.invalidate();
+    return true;
+  }
+
+  insertMeasure(m, after = false) {
+    return this._structure(insertMeasures(this.doc, after ? m + 1 : m), after ? m + 1 : m);
+  }
+
+  deleteMeasure(m) {
+    if (m >= measureCount(this.doc)) return false;
+    return this._structure(deleteMeasures(this.doc, m), Math.min(m, Math.max(0, measureCount(this.doc) - 2)));
+  }
+
+  // Length in whole notes for measures [from, to).
+  setLength(from, to, len) {
+    return this._structure(setMeasureLength(this.doc, from, to, len), from);
+  }
+
+  setBpmAt(at, bpm) {
+    const ok = this.commit(setBpm(this.doc, at.m, at.pos, bpm));
+    this.cursorBeat = this.t.beatOf(at.m, at.pos);
+    return ok;
+  }
+
+  removeBpmAt(at) { return this.commit(removeBpm(this.doc, at.m, at.pos)); }
+
+  // Give the selected notes a sound; new notes on those types use it too.
+  setSound(val) {
+    const list = this.selected();
+    if (!list.length) return false;
+    for (const e of list) this.penVal.set(e.ch, val);
+    this.lastVal = val;
+    return this.commit(setEventsVal(this.doc, list, val), list.map((e) => ({ ...e, val })));
+  }
+
+  // changes: { NAME: value | null } (null removes the header).
+  setHeaders(changes) {
+    let doc = this.doc;
+    for (const [name, value] of Object.entries(changes)) {
+      if ((getHeader(doc, name) ?? null) === (value ?? null)) continue;
+      doc = setHeader(doc, name, value);
+    }
+    return this.commit(doc);
+  }
+
+  // Replace the document by an edited one (e.g. after adding a #WAV).
+  apply(doc, select = null) { return this.commit(doc, select); }
+
+  _measureMenu(y) {
+    const m = this.measureAt(Math.max(0, this.beatAt(y)));
+    this.cursorBeat = this.t.starts[m] ?? 0;
+    this.invalidate();
+    this.onMeasureMenu?.(m);
   }
 
   copy() {
@@ -356,11 +458,13 @@ export class Editor {
 
   _down(e) {
     if (!this.doc) return;
+    if (e.pointerType === 'mouse' && (e.button !== 0 || e.ctrlKey)) return; // context menu
     try { this.canvas.setPointerCapture(e.pointerId); } catch { /* synthetic */ }
     const p = this._local(e);
     this._pointers.set(e.pointerId, p);
     if (this._pointers.size === 2) {
       // Two fingers: scroll + pinch.
+      clearTimeout(this._drag?.timer);
       const [a, b] = [...this._pointers.values()];
       this._drag = { mode: 'pinch', dist: Math.hypot(a.x - b.x, a.y - b.y), midY: (a.y + b.y) / 2, ppb: this.ppb, scroll: this.scrollBeat };
       return;
@@ -375,7 +479,13 @@ export class Editor {
       return;
     }
     if (p.x < this.x0) {
-      this._drag = { mode: 'gutter', y0: p.y, scroll: this.scrollBeat, moved: false };
+      const d = { mode: 'gutter', y0: p.y, scroll: this.scrollBeat, moved: false };
+      d.timer = setTimeout(() => {
+        if (this._drag !== d || d.moved) return;
+        this._drag = null;
+        this._measureMenu(d.y0);
+      }, LONG_PRESS_MS);
+      this._drag = d;
       return;
     }
     const lane = this.laneAt(p.x);
@@ -451,6 +561,7 @@ export class Editor {
     if (!d) return;
     if (d.mode === 'pinch') { if (!this._pointers.size) this._drag = null; return; }
     this._drag = null;
+    clearTimeout(d.timer);
     if (cancel) { this.invalidate(); return; }
     if (d.mode === 'gutter' && !d.moved) {
       const beat = Math.max(0, this.beatAt(d.y0));
@@ -464,7 +575,7 @@ export class Editor {
         for (const ev of this.doc.events) {
           const lane = this.chLane.get(ev.ch);
           if (lane === undefined) continue;
-          const cx = this.laneX(lane) + this.lanes[lane].w * LANE_PX / 2;
+          const cx = this.laneX(lane) + this.lanes[lane].w * this.lanePx / 2;
           const y = this.yOf(this.beatOf(ev));
           if (cx >= x0 && cx <= x1 && y >= y0 && y <= y1) this.sel.add(keyOf(ev));
         }
@@ -534,10 +645,17 @@ export class Editor {
     // Lanes.
     this.lanes.forEach((l, i) => {
       g.fillStyle = i % 2 ? '#181826' : '#1c1c2c';
-      g.fillRect(this.laneX(i), 0, l.w * LANE_PX, bottom);
+      g.fillRect(this.laneX(i), 0, l.w * this.lanePx, bottom);
     });
     g.fillStyle = '#151520';
     g.fillRect(bgmX, 0, BGM_W, bottom);
+
+    // The cursor's measure, in the gutter.
+    const cm = this.measureAt(this.cursorBeat);
+    if (starts[cm + 1] >= vis0 && starts[cm] <= vis1) {
+      g.fillStyle = 'rgba(77,163,255,0.14)';
+      g.fillRect(x0 - GUTTER, this.yOf(starts[cm + 1]), GUTTER - 2, this.yOf(starts[cm]) - this.yOf(starts[cm + 1]));
+    }
 
     // Measures, grid, beats.
     g.font = '11px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
@@ -570,8 +688,13 @@ export class Editor {
       }
     }
 
-    // Tempo changes.
+    // Tempo: the start tempo, then each change.
     g.textAlign = 'left';
+    const startsWithChange = this.doc.events.some((e) => (e.ch === 0x03 || e.ch === 0x08) && e.m === 0 && e.pos.n === 0);
+    if (!startsWithChange && vis0 <= 1) {
+      g.fillStyle = '#ff9030';
+      g.fillText(`${Math.round(this.t.bpmAt(0) * 100) / 100}`, x0 - GUTTER + 4, Math.round(this.yOf(0)) - 3);
+    }
     for (const e of this.doc.events) {
       if (e.ch !== 0x03 && e.ch !== 0x08) continue;
       const b = this.beatOf(e);
@@ -625,6 +748,13 @@ export class Editor {
       g.strokeRect(rx + 0.5, ry + 0.5, Math.abs(d.x1 - d.x0), Math.abs(d.y1 - d.y0));
     }
 
+    // Cursor (where Paste, Play and tempo changes go).
+    if (this.playBeat == null && this.cursorBeat >= vis0 - 1 && this.cursorBeat <= vis1 + 1) {
+      const y = Math.round(this.yOf(this.cursorBeat));
+      g.fillStyle = 'rgba(77,163,255,0.7)';
+      for (let x = x0 - 8; x < x1; x += 8) g.fillRect(x, y, 4, 1);
+    }
+
     // Playhead.
     if (this.playBeat != null) {
       const y = Math.round(this.yOf(this.playBeat));
@@ -644,7 +774,7 @@ export class Editor {
       const ch = this.laneCh(i);
       const name = TYPE_NAME[ch] || l.id;
       g.fillStyle = this.colors[CH_TYPE.get(ch)] || '#ccc';
-      g.fillText(LANE_TYPES[l.id] ? `${name} ⇄` : name, this.laneX(i) + l.w * LANE_PX / 2, bottom + 18);
+      g.fillText(LANE_TYPES[l.id] ? `${name} ⇄` : name, this.laneX(i) + l.w * this.lanePx / 2, bottom + 18);
     });
     g.fillStyle = '#8a8aa6';
     g.fillText('BGM', bgmX + BGM_W / 2, bottom + 18);
@@ -653,7 +783,7 @@ export class Editor {
   _note(g, lane, beat, ch, selected) {
     const l = this.lanes[lane];
     const x = this.laneX(lane) + 3;
-    const w = l.w * LANE_PX - 6;
+    const w = l.w * this.lanePx - 6;
     const y = Math.round(this.yOf(beat));
     const color = this.colors[CH_TYPE.get(ch)] || '#ccc';
     if (ch === 0x18) {

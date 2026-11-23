@@ -488,7 +488,7 @@ input[type="range"] { accent-color: var(--accent); }
 /* ---- chart editor ---- */
 #ed-info { display: flex; flex-direction: column; flex: 1; min-width: 0; }
 #ed-title { font-size: 16px; font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-#ed-sub { font-size: 12px; color: var(--dim); }
+#ed-sub { font-size: 12px; color: var(--dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 #ed-save.unsaved::after { content: " •"; }
 .ed-toolbar {
   flex: 0 0 auto;
@@ -507,9 +507,59 @@ input[type="range"] { accent-color: var(--accent); }
   font-size: 12px; padding: 3px 6px;
 }
 #ed-status { margin-left: auto; font-variant-numeric: tabular-nums; color: var(--dim); }
-#ed-wrap { flex: 1; min-height: 0; position: relative; padding-bottom: env(safe-area-inset-bottom); }
-#ed-canvas { display: block; width: 100%; height: 100%; touch-action: none; cursor: crosshair; }
+#ed-wrap { flex: 1; min-height: 0; position: relative; display: flex; padding-bottom: env(safe-area-inset-bottom); }
+#ed-canvas { display: block; flex: 1 1 0; min-width: 0; height: 100%; touch-action: none; cursor: crosshair; }
 #ed-canvas.select { cursor: default; }
+#ed-sounds {
+  flex: 0 0 300px; display: flex; flex-direction: column; gap: 8px; min-height: 0;
+  padding: 10px 12px; padding-right: calc(12px + env(safe-area-inset-right));
+  background: var(--panel); border-left: 1px solid var(--border); font-size: 13px;
+}
+#ed-sounds[hidden] { display: none; }
+.eds-head { display: flex; align-items: center; justify-content: space-between; }
+.eds-note { margin: 0; color: var(--dim); font-size: 12px; line-height: 1.4; }
+#ed-sounds input[type="search"], #ed-sounds select {
+  background: var(--panel2); color: var(--text);
+  border: 1px solid var(--border); border-radius: 5px; padding: 5px 8px; font-size: 13px; min-width: 0;
+}
+#eds-list { list-style: none; flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 2px; }
+#eds-list li {
+  display: flex; align-items: center; gap: 6px; padding: 3px 4px; border-radius: 5px;
+  border: 1px solid transparent;
+}
+#eds-list li.in-sel { border-color: var(--accent); background: rgba(77, 163, 255, 0.1); }
+#eds-list li.missing .eds-file { color: #ff8080; }
+#eds-list code { font-size: 12px; color: var(--dim); width: 20px; flex-shrink: 0; }
+#eds-list .eds-file { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#eds-list .eds-count { color: var(--dim); font-size: 11px; font-variant-numeric: tabular-nums; }
+#eds-list .eds-play {
+  background: none; border: 1px solid var(--border); border-radius: 4px; color: var(--text);
+  width: 24px; height: 22px; font-size: 10px; cursor: pointer; flex-shrink: 0;
+}
+#eds-list .eds-play:hover { border-color: var(--accent); }
+.eds-add { display: flex; flex-direction: column; gap: 4px; color: var(--dim); font-size: 12px; }
+.ed-dialog { color: var(--text); margin: auto; width: min(420px, 95vw); }
+.ed-dialog::backdrop { background: rgba(8, 8, 14, 0.6); }
+.ed-dialog form { display: flex; flex-direction: column; gap: 10px; }
+.ed-dialog h2 { font-size: 16px; }
+.ed-dialog h3 { font-size: 12px; color: var(--dim); text-transform: uppercase; letter-spacing: 0.5px; margin-top: 6px; }
+.ed-dialog .panel-foot { gap: 8px; }
+.ed-dialog .panel-note { margin: 0; font-size: 12px; color: var(--dim); }
+.edm-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: 13px; }
+.edm-row input, .edm-row select {
+  background: var(--panel2); color: var(--text);
+  border: 1px solid var(--border); border-radius: 5px; padding: 5px 8px; font-size: 14px;
+}
+.edm-row input[type="number"] { width: 84px; }
+.ed-dialog .edm-row select { margin-left: 0; }
+@media (max-width: 700px) {
+  #ed-sounds {
+    position: absolute; left: 0; right: 0; bottom: 0; height: 48%; z-index: 2;
+    border-left: 0; border-top: 1px solid var(--border);
+    padding-left: calc(16px + env(safe-area-inset-left)); padding-right: calc(16px + env(safe-area-inset-right));
+    padding-bottom: calc(10px + env(safe-area-inset-bottom));
+  }
+}
 @media (max-width: 640px) {
   .ed-toolbar { padding-left: 16px; padding-right: 16px; gap: 6px 10px; }
   #ed-status { width: 100%; margin-left: 0; }

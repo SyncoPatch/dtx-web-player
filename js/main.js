@@ -10,7 +10,7 @@ import {
 import {
   normPath, dirname, basename, makeResolver, scanTree,
   searchTerms, matchTerms, songHaystack, boxPathOf, descendantIds, passesFilters, SORTS,
-  writeBoxDef, encodeShiftJIS,
+  writeBoxDef, encodeShiftJIS, AUDIO_EXTS,
 } from './library.js';
 import { Player, NOTE_TYPES, LANE_IDS, GROUP_RULES, defaultColors, defaultDisplay } from './player.js';
 import { Skin, collectSkinFiles } from './skin.js';
@@ -21,7 +21,10 @@ import { buildTimedChart, barTimesForSync } from './gpsync.js';
 import { assignFeet, kickKey, pedalKey, DEFAULT_FEET, CH_BD, CH_LBD, CH_LP } from './feet.js';
 import { SoundBank } from './audio.js';
 import { ROLES, listModels, removeModel, installFromFiles, installFromUrl, opfsAvailable } from './models.js';
-import { fromDtx, toDtx } from './chartdoc.js';
+import {
+  fromDtx, toDtx, frac, fracValue, lenOf, measureCount, lengthRunEnd, eventsPastLength, bpmEventAt,
+  getHeader, setHeader, setBpm, wavList, wavUsage, addWav,
+} from './chartdoc.js';
 import { Editor, GRIDS } from './editor.js';
 
 const $ = (id) => document.getElementById(id);
@@ -1593,6 +1596,8 @@ function updateEditorChrome() {
   const notes = editor.doc.events.filter((e) => editor.chLane.has(e.ch)).length;
   $('ed-sub').textContent = `${ed.chartInfo.label || ed.chartInfo.title || basename(ed.chartInfo.path)} · ${notes} notes`
     + (hasSel ? ` · ${editor.sel.size} selected` : '');
+  $('ed-sounds-btn').classList.toggle('active', !$('ed-sounds').hidden);
+  renderSounds();
 }
 
 function ensureEditor() {
@@ -1613,6 +1618,7 @@ function ensureEditor() {
       else { editor.playBeat = null; editor.invalidate(); }
     },
     onStatus: (text) => { $('ed-status').textContent = text; },
+    onMeasureMenu: (m) => openMeasureDialog(m),
   });
   sel.value = String(editor.grid);
   sel.onchange = () => editor.setGrid(Number(sel.value));
@@ -1627,6 +1633,10 @@ function ensureEditor() {
   $('ed-zoom-in').onclick = () => editor.zoom(1.25);
   $('ed-zoom-out').onclick = () => editor.zoom(0.8);
   $('ed-play').onclick = () => toggleEditorPlay();
+  $('ed-measure').onclick = () => openMeasureDialog();
+  $('ed-props').onclick = () => openPropsDialog();
+  $('ed-sounds-btn').onclick = () => toggleSounds();
+  $('eds-close').onclick = () => toggleSounds(false);
   $('ed-save').onclick = () => saveEditor();
   $('ed-revert').onclick = () => revertEditor();
   $('ed-close').onclick = () => closeEditor();
@@ -1647,11 +1657,15 @@ async function openEditor(song, chartInfo, { from = 'library', at = 0 } = {}) {
     const files = new Map((await getSongFiles(song.id)).map((f) => [f.path, f]));
     const rec = files.get(info.path);
     if (!rec) throw new Error('Chart file missing from local storage.');
-    const doc = fromDtx(decodeText(await rec.blob.arrayBuffer()));
+    const text = decodeText(await rec.blob.arrayBuffer());
+    const doc = fromDtx(text);
     ensureEditor();
     player?.pause();
     el.btnPlay.textContent = 'Play';
-    ed = { song: fresh, chartInfo: info, files, from, at, saved: false };
+    const h0 = parseDTX(text, { headersOnly: true });
+    ed = { song: fresh, chartInfo: info, files, from, at, saved: false, meta: { title: h0.title, artist: h0.artist || '' } };
+    edsKey = null;
+    $('eds-filter').value = '';
     editor.colors = settings.colors;
     editor.setLaneOrder(settings.laneOrder);
     editor.setDoc(doc);
@@ -1689,21 +1703,31 @@ function stopEditorPlay() {
   editor.invalidate();
 }
 
+function ensureEdPlayer() {
+  if (!edPlayer) {
+    edPlayer = new Player(document.createElement('canvas'));
+    applySettings(edPlayer);
+    edPlayer.onEnded = () => stopEditorPlay();
+  }
+  return edPlayer;
+}
+
+// Song files as the chart sees them (#WAV paths are relative to its folder).
+function chartResolver() {
+  const fileMap = new Map([...ed.files].filter(([p]) => !isOrigPath(p)).map(([p, f]) => [p, f.blob]));
+  return makeResolver(fileMap, dirname(ed.chartInfo.path));
+}
+
 async function toggleEditorPlay() {
   if (!ed) return;
   if (edPlayer?.playing) { stopEditorPlay(); return; }
   try {
-    if (!edPlayer) {
-      edPlayer = new Player(document.createElement('canvas'));
-      applySettings(edPlayer);
-      edPlayer.onEnded = () => stopEditorPlay();
-    }
+    ensureEdPlayer();
     if (edLoaded !== editor.doc) {
       showOverlay('Loading sounds…');
       const dtx = parseDTX(toDtx(editor.doc));
       if (!dtx.chips.length) throw new Error('This chart has no notes or sounds to play yet.');
-      const fileMap = new Map([...ed.files].filter(([p]) => !isOrigPath(p)).map(([p, f]) => [p, f.blob]));
-      await edPlayer.load(dtx, makeResolver(fileMap, dirname(ed.chartInfo.path)));
+      await edPlayer.load(dtx, chartResolver());
       edLoaded = editor.doc;
       hideOverlay();
     }
@@ -1746,14 +1770,20 @@ async function saveEditor() {
         if (h.title) d.title = h.title;
         d.level = h.level;
         d.bpm = h.bpm;
+        d.genre = h.genre || '';
       }
+      // The song's name follows the chart's when it came from it.
+      if (h.title && s.title === ed.meta.title) s.title = h.title;
+      if ((s.artist || '') === ed.meta.artist) s.artist = h.artist || '';
       s.size = Math.max(0, (s.size || 0) + delta);
     }, put);
     if (!saved) throw new Error('This song was deleted from the library.');
     for (const f of put) ed.files.set(f.path, f);
     ed.song = saved;
     ed.chartInfo = saved.dtxs.find((x) => x.path === path) || ed.chartInfo;
+    ed.meta = { title: h.title, artist: h.artist || '' };
     ed.saved = true;
+    $('ed-title').textContent = saved.title;
     editor.markSaved();
     return true;
   } catch (err) {
@@ -1797,6 +1827,7 @@ async function closeEditor() {
   if (!ed) return;
   if (editor.dirty && !confirm('Leave the editor without saving your changes?')) return;
   stopEditorPlay();
+  for (const id of ['ed-measure-dialog', 'ed-props-dialog']) if ($(id).open) $(id).close();
   const { song, chartInfo, from, saved } = ed;
   const at = editor.t.timeOfBeat(editor.cursorBeat);
   ed = null;
@@ -1821,6 +1852,225 @@ $('btn-edit').onclick = () => {
 
 window.addEventListener('beforeunload', (e) => {
   if (ed && editor?.dirty) { e.preventDefault(); e.returnValue = ''; }
+});
+
+// ---- editor: measures, tempo, chart properties, sounds ----
+
+const fmtNum = (x) => String(Math.round(x * 1000) / 1000);
+const mm3 = (m) => String(m).padStart(3, '0');
+let edmMeasure = 0;     // measure the dialog acts on
+let edmAt = null;       // { m, pos } for the tempo
+let edsKey = null;      // what the sounds list was last drawn from
+
+function beatLabel(at) {
+  const beat = 1 + fracValue(at.pos) * 4 * lenOf(editor.doc, at.m);
+  return `measure ${mm3(at.m)}, beat ${fmtNum(beat)}`;
+}
+
+function openMeasureDialog(m = editor.measureAt(editor.cursorBeat)) {
+  if (!ed) return;
+  stopEditorPlay();
+  const doc = editor.doc;
+  const real = m < measureCount(doc);
+  edmMeasure = m;
+  $('edm-title').textContent = `Measure ${mm3(m)}${real ? '' : ' (after the end)'}`;
+  $('edm-delete').disabled = !real;
+  const len = lenOf(doc, m);
+  const den = [4, 8, 16].find((d) => Math.abs(len * d - Math.round(len * d)) < 1e-9) || 16;
+  $('edm-den').value = String(den);
+  $('edm-num').value = String(Math.max(1, Math.round(len * den)));
+  const end = real ? lengthRunEnd(doc, m) : m + 1;
+  $('edm-len-run').checked = false;
+  $('edm-len-run').disabled = end <= m + 1;
+  $('edm-len-run-label').textContent = end > m + 1
+    ? `Also ${end - m > 2 ? `measures ${mm3(m + 1)}–${mm3(end - 1)}` : `measure ${mm3(m + 1)}`} (up to the next length change)`
+    : 'Also the following measures (none share this length)';
+  // The tempo goes at the cursor when it is in this measure, else at its start.
+  let at = editor.cursorPos();
+  if (at.m !== m) at = { m, pos: frac(0, 1) };
+  edmAt = at;
+  const change = bpmEventAt(doc, at.m, at.pos);
+  const now = editor.t.bpmAt(editor.t.beatOf(at.m, at.pos) + 1e-9);
+  const isStart = at.m === 0 && at.pos.n === 0;
+  $('edm-bpm-at').textContent = `At ${beatLabel(at)} (the cursor): ${fmtNum(now)} BPM`
+    + (isStart ? ', the start tempo.' : change ? ', a tempo change.' : '. Set adds a tempo change here.');
+  $('edm-bpm').value = fmtNum(now);
+  $('edm-bpm-remove').hidden = !change || isStart;
+  $('ed-measure-dialog').showModal();
+}
+
+function closeMeasureDialog() { $('ed-measure-dialog').close(); }
+
+$('edm-ins-before').onclick = () => { editor.insertMeasure(edmMeasure); closeMeasureDialog(); };
+$('edm-ins-after').onclick = () => { editor.insertMeasure(edmMeasure, true); closeMeasureDialog(); };
+$('edm-delete').onclick = () => {
+  const bgm = editor.doc.events.filter((e) => e.m === edmMeasure && (e.ch === 0x01 || (e.ch >= 0x61 && e.ch <= 0x92))).length;
+  if (bgm && !confirm(`Measure ${mm3(edmMeasure)} starts ${bgm} background sound${bgm > 1 ? 's' : ''} (BGM or effects). Delete ${bgm > 1 ? 'them' : 'it'} with the measure?`)) return;
+  editor.deleteMeasure(edmMeasure);
+  closeMeasureDialog();
+};
+$('edm-len-apply').onclick = () => {
+  const num = Number($('edm-num').value), den = Number($('edm-den').value);
+  if (!(Number.isInteger(num) && num >= 1 && num <= 128)) { $('edm-num').focus(); return; }
+  const len = num / den;
+  const to = $('edm-len-run').checked ? lengthRunEnd(editor.doc, edmMeasure) : edmMeasure + 1;
+  const cut = eventsPastLength(editor.doc, edmMeasure, to, len).length;
+  if (cut && !confirm(`${cut} note${cut > 1 ? 's' : ''} past the new end of the measure will be removed.`)) return;
+  editor.setLength(edmMeasure, to, len);
+  closeMeasureDialog();
+};
+$('edm-bpm-set').onclick = () => {
+  const bpm = Number($('edm-bpm').value);
+  if (!(bpm > 0 && bpm < 10000)) { $('edm-bpm').focus(); return; }
+  editor.setBpmAt(edmAt, bpm);
+  closeMeasureDialog();
+};
+$('edm-bpm-remove').onclick = () => { editor.removeBpmAt(edmAt); closeMeasureDialog(); };
+
+function openPropsDialog() {
+  if (!ed) return;
+  const d = editor.doc;
+  $('edp-title').value = getHeader(d, 'TITLE') ?? '';
+  $('edp-artist').value = getHeader(d, 'ARTIST') ?? '';
+  $('edp-genre').value = getHeader(d, 'GENRE') ?? '';
+  $('edp-level').value = getHeader(d, 'DLEVEL') ?? '';
+  $('edp-bpm').value = fmtNum(editor.t.bpmAt(0));
+  $('ed-props-dialog').showModal();
+}
+
+$('ed-props-dialog').addEventListener('close', () => {
+  if ($('ed-props-dialog').returnValue !== 'ok' || !ed) return;
+  let doc = editor.doc;
+  for (const [name, id] of [['TITLE', 'edp-title'], ['ARTIST', 'edp-artist'], ['GENRE', 'edp-genre'], ['DLEVEL', 'edp-level']]) {
+    const v = $(id).value.trim() || null;
+    if ((getHeader(doc, name) ?? null) !== v) doc = setHeader(doc, name, v);
+  }
+  const bpm = Number($('edp-bpm').value);
+  if (bpm > 0 && Math.abs(bpm - editor.t.bpmAt(0)) > 1e-9) doc = setBpm(doc, 0, frac(0, 1), bpm);
+  editor.apply(doc);
+});
+
+function toggleSounds(show = $('ed-sounds').hidden) {
+  $('ed-sounds').hidden = !show;
+  edsKey = null;
+  updateEditorChrome();
+}
+
+// Song audio files the chart doesn't define yet, as paths relative to it.
+function unusedAudio(wavs, resolve) {
+  const used = new Set();
+  for (const file of wavs.values()) { const b = resolve(file); if (b) used.add(b); }
+  const dir = dirname(ed.chartInfo.path);
+  const out = [];
+  for (const [p, f] of ed.files) {
+    if (isOrigPath(p) || used.has(f.blob)) continue;
+    const ext = p.slice(p.lastIndexOf('.')).toLowerCase();
+    if (!AUDIO_EXTS.includes(ext)) continue;
+    const rel = !dir ? p : p.startsWith(dir + '/') ? p.slice(dir.length + 1) : null;
+    if (rel) out.push(rel);
+  }
+  return out.sort((a, b) => a.localeCompare(b));
+}
+
+function renderSounds() {
+  if (!editor || !ed || $('ed-sounds').hidden) return;
+  const doc = editor.doc;
+  const filter = $('eds-filter').value.trim().toLowerCase();
+  const selKey = [...editor.sel].sort().join(',');
+  if (edsKey && edsKey.doc === doc && edsKey.sel === selKey && edsKey.filter === filter) return;
+  const selChanged = !edsKey || edsKey.sel !== selKey;
+  edsKey = { doc, sel: selKey, filter };
+  const wavs = wavList(doc);
+  const usage = wavUsage(doc);
+  const sel = editor.selected();
+  const selVals = new Set(sel.map((e) => e.val));
+  const resolve = chartResolver();
+  $('eds-sel').textContent = sel.length
+    ? `${sel.length} selected note${sel.length > 1 ? 's' : ''} ${sel.length > 1 ? 'use' : 'uses'} ${[...selVals].sort().join(', ')}. Use gives ${sel.length > 1 ? 'them' : 'it'} another sound; new notes of ${sel.length > 1 ? 'those types' : 'that type'} use it too.`
+    : 'Select notes (Select tool) to change their sound. New notes get the sound used most on their type.';
+  const list = $('eds-list');
+  list.replaceChildren();
+  for (const [val, file] of wavs) {
+    if (filter && !val.toLowerCase().includes(filter) && !file.toLowerCase().includes(filter)) continue;
+    const li = document.createElement('li');
+    li.dataset.val = val;
+    const found = !!resolve(file);
+    li.classList.toggle('in-sel', selVals.has(val));
+    li.classList.toggle('missing', !found);
+    const play = document.createElement('button');
+    play.className = 'eds-play';
+    play.textContent = '▶';
+    play.title = `Play ${file}`;
+    play.disabled = !found;
+    const code = document.createElement('code');
+    code.textContent = val;
+    const name = document.createElement('span');
+    name.className = 'eds-file';
+    name.textContent = file;
+    name.title = found ? file : `${file} — not found in this song’s files`;
+    const count = document.createElement('span');
+    count.className = 'eds-count';
+    count.textContent = String(usage.get(val) || 0);
+    count.title = 'Notes and sounds using it';
+    const use = document.createElement('button');
+    use.className = 'btn small eds-use';
+    use.textContent = 'Use';
+    use.disabled = !sel.length || (selVals.size === 1 && selVals.has(val));
+    use.title = sel.length ? `Give the selected notes ${file}` : 'Select notes first';
+    li.append(play, code, name, count, use);
+    list.append(li);
+  }
+  if (!list.children.length) {
+    const li = document.createElement('li');
+    li.className = 'eds-note';
+    li.textContent = wavs.size ? 'No sound matches.' : 'This chart defines no sounds yet.';
+    list.append(li);
+  }
+  if (selChanged) list.querySelector('.in-sel')?.scrollIntoView({ block: 'nearest' });
+  const add = $('eds-add');
+  add.replaceChildren(new Option('Choose a file…', ''));
+  const unused = unusedAudio(wavs, resolve);
+  for (const p of unused) add.append(new Option(p, p));
+  add.disabled = !unused.length;
+  if (!unused.length) add.options[0].textContent = 'All of the song’s audio files are in use';
+}
+
+async function previewSound(file) {
+  const blob = chartResolver()(file);
+  if (!blob) return;
+  try {
+    const p = ensureEdPlayer();
+    await p.ctx.resume();
+    const buffer = await p.bank.decode(blob);
+    const src = p.ctx.createBufferSource();
+    src.buffer = buffer;
+    src.connect(p.ctx.destination);
+    src.start();
+  } catch (err) {
+    console.error(err);
+    $('eds-sel').textContent = `Couldn’t play ${file}: ${err.message}`;
+  }
+}
+
+$('eds-list').addEventListener('click', (e) => {
+  const li = e.target.closest('li[data-val]');
+  if (!li) return;
+  const val = li.dataset.val;
+  if (e.target.closest('.eds-play')) previewSound(wavList(editor.doc).get(val));
+  else if (e.target.closest('.eds-use')) editor.setSound(val);
+});
+$('eds-filter').addEventListener('input', () => renderSounds());
+$('eds-add').addEventListener('change', () => {
+  const file = $('eds-add').value;
+  if (!file) return;
+  try {
+    const [doc, val] = addWav(editor.doc, file);
+    $('eds-filter').value = '';
+    editor.apply(doc);
+    $('eds-list').querySelector(`li[data-val="${val}"]`)?.scrollIntoView({ block: 'nearest' });
+  } catch (err) {
+    alert(err.message);
+  }
 });
 
 // ---- PDF export ----
